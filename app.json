@@ -1,0 +1,67 @@
+{
+  "expo": {
+    "name": "LUMI",
+    "slug": "lumi",
+    "version": "1.0.1",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "lumi",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.ritikmandal.lumi",
+      "infoPlist": {
+        "NSCameraUsageDescription": "LUMI needs camera access for video streaming.",
+        "NSMicrophoneUsageDescription": "LUMI needs microphone access to talk through your robot."
+      },
+      "bitcode": false
+    },
+    "android": {
+      "package": "com.ritikmandal.lumi",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.INTERNET",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#0D0E1A",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#0D0E1A"
+        }
+      ],
+      "@livekit/react-native-expo-plugin",
+      "@config-plugins/react-native-webrtc"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "b02edee7-e22c-400d-a237-ddf714ba5cf4"
+      }
+    },
+    "owner": "http_ritik"
+  }
+}

@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LUMI Virtual Robot Hardware Simulator</title>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #090A10;
+      --card-bg: #121422;
+      --card-border: #22253B;
+      --primary: #8B5CF6;
+      --primary-glow: rgba(139, 92, 246, 0.4);
+      --accent: #06B6D4;
+      --success: #10B981;
+      --warning: #F59E0B;
+      --error: #EF4444;
+      --text: #F8FAFC;
+      --text-muted: #94A3B8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-logo {
+      width: 40px; height: 40px; border-radius: 12px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 20px; color: #FFF;
+      box-shadow: 0 0 20px var(--primary-glow);
+    }
+    h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+    .subtitle { color: var(--text-muted); font-size: 13px; }
+
+    .status-badge {
+      padding: 6px 14px; border-radius: 20px; font-size: 12px;
+      font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+      display: flex; align-items: center; gap: 8px;
+      background: rgba(239, 68, 68, 0.15); color: var(--error); border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+    .status-badge.online {
+      background: rgba(16, 185, 129, 0.15); color: var(--success); border-color: rgba(16, 185, 129, 0.3);
+    }
+    .status-badge.pairing {
+      background: rgba(245, 158, 11, 0.15); color: var(--warning); border-color: rgba(245, 158, 11, 0.3);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 360px 1fr 340px;
+      gap: 20px;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .card-title {
+      font-size: 14px; font-weight: 700; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 1px;
+    }
+
+    /* OLED Screen Simulation */
+    .oled-screen {
+      background: #000;
+      border: 3px solid #1E2235;
+      border-radius: 12px;
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      box-shadow: inset 0 0 15px rgba(6, 182, 212, 0.2), 0 0 15px rgba(0,0,0,0.5);
+      position: relative;
+      overflow: hidden;
+      min-height: 180px;
+    }
+    .oled-screen::before {
+      content: "";
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+      background-size: 100% 4px;
+      pointer-events: none;
+    }
+    .oled-label { font-size: 11px; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 8px; }
+    .oled-code {
+      font-family: "Courier New", monospace;
+      font-size: 42px; font-weight: 800;
+      color: #06B6D4;
+      text-shadow: 0 0 12px rgba(6, 182, 212, 0.8);
+      letter-spacing: 6px;
+    }
+    .oled-desc { font-size: 11px; color: var(--text-muted); margin-top: 8px; text-align: center; }
+
+    /* Inputs & Buttons */
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    label { font-size: 12px; color: var(--text-muted); font-weight: 600; }
+    input, select {
+      background: #0B0D18;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--text);
+      font-size: 13px;
+      outline: none;
+    }
+    input:focus { border-color: var(--primary); }
+
+    button {
+      background: linear-gradient(135deg, var(--primary), #7C3AED);
+      border: none; border-radius: 10px; padding: 12px 18px;
+      color: #FFF; font-weight: 600; font-size: 14px;
+      cursor: pointer; transition: all 0.2s;
+      box-shadow: 0 4px 15px var(--primary-glow);
+    }
+    button:hover { opacity: 0.95; transform: translateY(-1px); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+    button.secondary {
+      background: #1E2235; color: var(--text); box-shadow: none;
+    }
+    button.secondary:hover { background: #2B304B; }
+
+    /* Video Viewport */
+    .video-container {
+      position: relative;
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      aspect-ratio: 16 / 9;
+      border: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    canvas#cameraCanvas {
+      width: 100%; height: 100%; object-fit: cover;
+    }
+    video#webcamVideo {
+      display: none;
+    }
+    .camera-hud {
+      position: absolute; top: 12px; left: 12px; right: 12px;
+      display: flex; justify-content: space-between;
+      font-family: monospace; font-size: 11px; color: var(--accent);
+      pointer-events: none; text-shadow: 0 0 5px rgba(0,0,0,0.8);
+    }
+
+    /* Motor Gauges */
+    .motor-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+    }
+    .motor-card {
+      background: #0B0D18; border: 1px solid var(--card-border);
+      border-radius: 10px; padding: 12px; text-align: center;
+    }
+    .motor-val { font-size: 22px; font-weight: 700; color: var(--accent); font-family: monospace; margin: 6px 0; }
+    .bar-bg { width: 100%; height: 6px; background: #1E2235; border-radius: 3px; overflow: hidden; }
+    .bar-fill { height: 100%; width: 50%; background: var(--accent); transition: width 0.1s; }
+
+    /* Log Output */
+    .log-box {
+      background: #07080F;
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 12px;
+      height: 220px;
+      overflow-y: auto;
+      font-family: "Courier New", monospace;
+      font-size: 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .log-entry { color: #A5B4FC; }
+    .log-entry.drive { color: #34D399; }
+    .log-entry.emote { color: #F472B6; }
+    .log-entry.stop { color: #F87171; font-weight: 700; }
+
+    /* Interactive Face */
+    .face-preview {
+      width: 80px; height: 80px; margin: 0 auto;
+      background: #17192C; border-radius: 50%;
+      border: 2px solid var(--primary);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 32px;
+      box-shadow: 0 0 15px var(--primary-glow);
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-logo">L</div>
+      <div>
+        <h1>LUMI Virtual Robot Hardware Simulator</h1>
+        <div class="subtitle">Emulates ESP32-S3 firmware, camera video stream, OLED pairing, & WebRTC data channel</div>
+      </div>
+    </div>
+    <div id="connStatus" class="status-badge">
+      <div class="dot"></div>
+      <span id="connStatusText">Offline</span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- Left Column: Identity & OLED screen -->
+    <div class="card">
+      <div class="card-title">1. Robot Hardware Identity</div>
+      <div class="form-group">
+        <label>Robot Hardware ID (lumi_id)</label>
+        <input type="text" id="lumiId" value="LUMI-SIM-01">
+      </div>
+      <div class="form-group">
+        <label>Device Secret (Flashing to NVS)</label>
+        <input type="text" id="deviceSecret" value="sec_98f4a1c720e34b1790dc88a10c4f83b2">
+      </div>
+
+      <button id="btnRegister" onclick="registerRobot()">Boot & Register Hardware</button>
+
+      <div class="card-title" style="margin-top: 8px;">Simulated Robot OLED Display</div>
+      <div class="oled-screen">
+        <div class="oled-label">PAIRING CODE</div>
+        <div class="oled-code" id="oledCode">------</div>
+        <div class="oled-desc" id="oledDesc">Press "Boot" to start setup</div>
+      </div>
+
+      <button id="btnConnectLivekit" class="secondary" onclick="connectLiveKit()" disabled>
+        Connect LiveKit Stream
+      </button>
+    </div>
+
+    <!-- Center Column: Video Stream & Driving HUD -->
+    <div class="card">
+      <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
+        <span>2. Robot Camera Video Stream</span>
+        <select id="videoSource" onchange="changeVideoSource()" style="padding: 4px 8px; font-size: 11px;">
+          <option value="synthetic">Animated Synthetic Room (HUD)</option>
+          <option value="webcam">Live Laptop Webcam</option>
+        </select>
+      </div>
+
+      <div class="video-container">
+        <canvas id="cameraCanvas" width="640" height="360"></canvas>
+        <video id="webcamVideo" autoplay playsinline muted></video>
+        <div class="camera-hud">
+          <span>CAM 01 // LIVEKIT 720p</span>
+          <span id="hudFps">30 FPS</span>
+          <span id="hudTime">00:00:00</span>
+        </div>
+      </div>
+
+      <div class="card-title">Real-Time Motor Actuators (PWM)</div>
+      <div class="motor-grid">
+        <div class="motor-card">
+          <div style="font-size: 11px; color: var(--text-muted);">LEFT MOTOR</div>
+          <div class="motor-val" id="leftMotorVal">0%</div>
+          <div class="bar-bg"><div class="bar-fill" id="leftMotorBar"></div></div>
+        </div>
+        <div class="motor-card">
+          <div style="font-size: 11px; color: var(--text-muted);">RIGHT MOTOR</div>
+          <div class="motor-val" id="rightMotorVal">0%</div>
+          <div class="bar-bg"><div class="bar-fill" id="rightMotorBar"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column: Emotion State, Telemetry & Logs -->
+    <div class="card">
+      <div class="card-title">3. Expressive Robot Face</div>
+      <div class="face-preview" id="faceIcon">😊</div>
+      <div style="text-align: center; font-size: 13px; font-weight: 600; color: var(--accent);" id="faceEmotion">
+        happy
+      </div>
+
+      <div class="card-title" style="margin-top: 4px;">Simulated Telemetry</div>
+      <div class="form-group">
+        <label>Battery: <span id="lblBattery">88%</span></label>
+        <input type="range" id="batterySlider" min="5" max="100" value="88" oninput="updateTelemetryDisplay()">
+      </div>
+      <div class="form-group">
+        <label>Wi-Fi Signal: <span id="lblWifi">4/4 Bars</span></label>
+        <input type="range" id="wifiSlider" min="1" max="4" value="4" oninput="updateTelemetryDisplay()">
+      </div>
+
+      <div class="card-title" style="margin-top: 4px;">Incoming Command Log</div>
+      <div class="log-box" id="logBox">
+        <div class="log-entry">Simulator initialized. Ready to boot.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const SUPABASE_URL = 'https://ehqqlxcdscgsebiodxfk.supabase.co';
+    let room = null;
+    let localVideoTrack = null;
+    let currentEmotion = 'happy';
+    let animFrameId = null;
+    let telemetryTimer = null;
+    let heartbeatTimer = null;
+    let lastDriveTime = 0;
+
+    const EMOTION_ICONS = {
+      happy: '😊',
+      curious: '🧐',
+      love: '😍',
+      excited: '🤩',
+      wink: '😉',
+      sleepy: '😴',
+      sad: '🥺',
+    };
+
+    // ─── 1. Register / Pair Robot ─────────────────────────────
+    async function registerRobot() {
+      const lumiId = document.getElementById('lumiId').value.trim();
+      const deviceSecret = document.getElementById('deviceSecret').value.trim();
+      log(`Calling POST /register-robot for ${lumiId}...`);
+
+      try {
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/register-robot`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lumi_id: lumiId, device_secret: deviceSecret })
+        });
+        const data = await res.json();
+
+        if (res.status === 201 || res.status === 200) {
+          if (data.status === 'pairing' && data.pairing_code) {
+            document.getElementById('oledCode').innerText = data.pairing_code;
+            document.getElementById('oledDesc').innerText = 'Enter code in LUMI App';
+            setConnectionStatus('pairing', 'Pairing Code Active');
+            log(`[OLED] Showing pairing code: ${data.pairing_code}`, 'drive');
+            document.getElementById('btnConnectLivekit').disabled = false;
+            startPairingPoll(lumiId, deviceSecret);
+          } else if (data.status === 'paired') {
+            document.getElementById('oledCode').innerText = 'PAIRED';
+            document.getElementById('oledDesc').innerText = 'Ready for LiveKit';
+            setConnectionStatus('online', 'Robot Paired');
+            document.getElementById('btnConnectLivekit').disabled = false;
+            log('Robot is already paired! Ready to connect stream.', 'drive');
+          }
+        } else {
+          log(`Error: ${JSON.stringify(data)}`, 'stop');
+        }
+      } catch (err) {
+        log(`Failed: ${err.message}`, 'stop');
+      }
+    }
+
+    // ─── 2. Poll for Claim Status ─────────────────────────────
+    let pollInterval = null;
+    function startPairingPoll(lumiId, deviceSecret) {
+      if (pollInterval) clearInterval(pollInterval);
+      pollInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`${SUPABASE_URL}/functions/v1/register-robot`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lumi_id: lumiId, device_secret: deviceSecret })
+          });
+          const data = await res.json();
+          if (data.status === 'paired') {
+            clearInterval(pollInterval);
+            document.getElementById('oledCode').innerText = 'PAIRED';
+            document.getElementById('oledDesc').innerText = 'User claimed robot!';
+            log('🎉 User claimed robot in app! Connecting LiveKit...', 'drive');
+            connectLiveKit();
+          }
+        } catch {}
+      }, 3000);
+    }
+
+    // ─── 3. Connect to LiveKit ────────────────────────────────
+    async function connectLiveKit() {
+      const lumiId = document.getElementById('lumiId').value.trim();
+      const deviceSecret = document.getElementById('deviceSecret').value.trim();
+
+      log(`Requesting robot LiveKit token...`);
+      try {
+        const tokRes = await fetch(`${SUPABASE_URL}/functions/v1/robot-token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lumi_id: lumiId, device_secret: deviceSecret })
+        });
+        const tokData = await tokRes.json();
+        if (tokRes.status !== 200) throw new Error(tokData.error || 'Failed token');
+
+        log(`Received token for room: ${tokData.room}`);
+        setConnectionStatus('pairing', 'Connecting WebRTC...');
+
+        room = new LivekitClient.Room({ adaptiveStream: true, dynacast: true });
+
+        // Handle incoming data channel messages
+        room.on(LivekitClient.RoomEvent.DataReceived, (payload) => {
+          try {
+            const text = new TextDecoder().decode(payload);
+            const msg = JSON.parse(text);
+            handleIncomingCommand(msg);
+          } catch (e) {
+            console.warn(e);
+          }
+        });
+
+        room.on(LivekitClient.RoomEvent.Connected, async () => {
+          setConnectionStatus('online', 'LiveKit Streaming');
+          log(`Connected to room: ${room.name}! Publishing video...`, 'drive');
+          await publishVideo();
+          startTelemetryLoop();
+          startHeartbeatLoop(lumiId, deviceSecret);
+        });
+
+        room.on(LivekitClient.RoomEvent.Disconnected, () => {
+          setConnectionStatus('offline', 'Disconnected');
+          log('Disconnected from LiveKit', 'stop');
+        });
+
+        await room.connect(tokData.url, tokData.token);
+      } catch (err) {
+        log(`LiveKit connection error: ${err.message}`, 'stop');
+        setConnectionStatus('offline', 'Error');
+      }
+    }
+
+    // ─── 4. Publish Video Track ──────────────────────────────
+    async function publishVideo() {
+      const canvas = document.getElementById('cameraCanvas');
+      const stream = canvas.captureStream(30);
+      const mediaTrack = stream.getVideoTracks()[0];
+      localVideoTrack = new LivekitClient.LocalVideoTrack(mediaTrack, { name: 'camera' });
+      await room.localParticipant.publishTrack(localVideoTrack);
+      log('Published 720p camera video track to room!', 'drive');
+    }
+
+    // ─── 5. Handle Incoming App Control Packets ──────────────
+    function handleIncomingCommand(msg) {
+      if (msg.t === 'drive') {
+        lastDriveTime = Date.now();
+        // Differential steering calculation
+        const x = msg.x || 0;
+        const y = msg.y || 0;
+        let left = Math.round((y + x) * 100);
+        let right = Math.round((y - x) * 100);
+        left = Math.max(-100, Math.min(100, left));
+        right = Math.max(-100, Math.min(100, right));
+
+        document.getElementById('leftMotorVal').innerText = `${left}%`;
+        document.getElementById('rightMotorVal').innerText = `${right}%`;
+        document.getElementById('leftMotorBar').style.width = `${Math.abs(left)}%`;
+        document.getElementById('rightMotorBar').style.width = `${Math.abs(right)}%`;
+
+        log(`[DRIVE] x: ${x.toFixed(2)}, y: ${y.toFixed(2)} | L: ${left}%, R: ${right}%`, 'drive');
+      } else if (msg.t === 'stop') {
+        document.getElementById('leftMotorVal').innerText = '0%';
+        document.getElementById('rightMotorVal').innerText = '0%';
+        document.getElementById('leftMotorBar').style.width = '0%';
+        document.getElementById('rightMotorBar').style.width = '0%';
+        log('[STOP] Emergency Stop or Joystick released', 'stop');
+      } else if (msg.t === 'emotion') {
+        setEmotion(msg.name);
+        log(`[EMOTION] Robot face set to: ${msg.name}`, 'emote');
+      } else if (msg.t === 'play') {
+        log(`[GESTURE] Executing gesture: ${msg.name}`, 'emote');
+      }
+    }
+
+    function setEmotion(emo) {
+      currentEmotion = emo;
+      document.getElementById('faceEmotion').innerText = emo;
+      document.getElementById('faceIcon').innerText = EMOTION_ICONS[emo] || '🤖';
+    }
+
+    // ─── 6. Send Telemetry to Mobile App ───────────────────────
+    function startTelemetryLoop() {
+      if (telemetryTimer) clearInterval(telemetryTimer);
+      telemetryTimer = setInterval(() => {
+        if (!room || room.state !== 'connected') return;
+
+        const battery = Number(document.getElementById('batterySlider').value);
+        const wifi = Number(document.getElementById('wifiSlider').value);
+
+        const packet = {
+          t: 'telemetry',
+          batteryPercent: battery,
+          wifiSignal: wifi,
+          latencyMs: Math.floor(35 + Math.random() * 20),
+          currentEmotion: currentEmotion
+        };
+
+        const payload = new TextEncoder().encode(JSON.stringify(packet));
+        room.localParticipant.publishData(payload, { reliable: false });
+      }, 1500);
+    }
+
+    function startHeartbeatLoop(lumiId, deviceSecret) {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      heartbeatTimer = setInterval(async () => {
+        const battery = Number(document.getElementById('batterySlider').value);
+        const wifi = Number(document.getElementById('wifiSlider').value);
+        try {
+          await fetch(`${SUPABASE_URL}/functions/v1/robot-heartbeat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              lumi_id: lumiId,
+              device_secret: deviceSecret,
+              battery_percent: battery,
+              wifi_signal: wifi,
+            })
+          });
+        } catch {}
+      }, 30000);
+    }
+
+    function updateTelemetryDisplay() {
+      document.getElementById('lblBattery').innerText = `${document.getElementById('batterySlider').value}%`;
+      document.getElementById('lblWifi').innerText = `${document.getElementById('wifiSlider').value}/4 Bars`;
+    }
+
+    // ─── 7. Synthetic Camera Canvas Animation ─────────────────
+    let gridOffset = 0;
+    function renderSyntheticCamera() {
+      const canvas = document.getElementById('cameraCanvas');
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+
+      // Dark futuristic room floor
+      ctx.fillStyle = '#070913';
+      ctx.fillRect(0, 0, w, h);
+
+      // Floor perspective grid
+      ctx.strokeStyle = '#1E254A';
+      ctx.lineWidth = 1;
+      gridOffset = (gridOffset + 1) % 40;
+
+      // Horizon line
+      ctx.fillStyle = '#0A0D1F';
+      ctx.fillRect(0, 0, w, h * 0.45);
+
+      // Vertical converging lines
+      for (let x = -w; x <= w * 2; x += 60) {
+        ctx.beginPath();
+        ctx.moveTo(w / 2, h * 0.45);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+      }
+
+      // Horizontal lines moving forward
+      for (let y = h * 0.45; y <= h; y += 20) {
+        ctx.beginPath();
+        ctx.moveTo(0, y + (gridOffset % 20));
+        ctx.lineTo(w, y + (gridOffset % 20));
+        ctx.stroke();
+      }
+
+      // Crosshair / reticle
+      ctx.strokeStyle = '#06B6D4';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(w / 2 - 25, h / 2 - 25, 50, 50);
+      ctx.beginPath();
+      ctx.arc(w / 2, h / 2, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#8B5CF6';
+      ctx.fill();
+
+      // Scanlines effect
+      ctx.fillStyle = 'rgba(6, 182, 212, 0.03)';
+      for (let i = 0; i < h; i += 4) {
+        ctx.fillRect(0, i, w, 2);
+      }
+
+      // Live Timestamp
+      document.getElementById('hudTime').innerText = new Date().toLocaleTimeString();
+
+      animFrameId = requestAnimationFrame(renderSyntheticCamera);
+    }
+    renderSyntheticCamera();
+
+    // ─── 8. Webcam Mode ───────────────────────────────────────
+    async function changeVideoSource() {
+      const mode = document.getElementById('videoSource').value;
+      if (mode === 'webcam') {
+        cancelAnimationFrame(animFrameId);
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 } });
+          const video = document.getElementById('webcamVideo');
+          video.srcObject = stream;
+          video.style.display = 'block';
+          document.getElementById('cameraCanvas').style.display = 'none';
+
+          if (localVideoTrack) {
+            await localVideoTrack.stop();
+            localVideoTrack = new LivekitClient.LocalVideoTrack(stream.getVideoTracks()[0]);
+            if (room && room.state === 'connected') {
+              await room.localParticipant.publishTrack(localVideoTrack);
+            }
+          }
+        } catch (e) {
+          alert('Webcam access error: ' + e.message);
+        }
+      } else {
+        document.getElementById('webcamVideo').style.display = 'none';
+        document.getElementById('cameraCanvas').style.display = 'block';
+        renderSyntheticCamera();
+      }
+    }
+
+    function setConnectionStatus(type, text) {
+      const badge = document.getElementById('connStatus');
+      badge.className = `status-badge ${type}`;
+      document.getElementById('connStatusText').innerText = text;
+    }
+
+    function log(msg, type = '') {
+      const box = document.getElementById('logBox');
+      const div = document.createElement('div');
+      div.className = `log-entry ${type}`;
+      const time = new Date().toLocaleTimeString();
+      div.innerText = `[${time}] ${msg}`;
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
+    }
+  </script>
+</body>
+</html>
