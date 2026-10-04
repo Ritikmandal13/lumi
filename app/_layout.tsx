@@ -31,6 +31,8 @@ import { ThemeProvider, useTheme } from '../src/theme';
 import { useAuthStore } from '../src/features/auth/useAuthStore';
 import '../src/lib/i18n';
 import { Platform } from 'react-native';
+import * as Linking from 'expo-linking';
+import { supabase } from '../src/lib/supabase';
 
 if (Platform.OS !== 'web') {
   // Initialize WebRTC globals for LiveKit on native platforms
@@ -107,6 +109,37 @@ function RootLayoutNav() {
   useEffect(() => {
     initialize();
   }, [initialize]);
+
+  // Deep linking: Handle return from email confirmation (lumi://#access_token=...&refresh_token=...)
+  useEffect(() => {
+    const handleUrl = async ({ url }: { url: string }) => {
+      if (!url) return;
+      try {
+        if (url.includes('access_token=') && url.includes('refresh_token=')) {
+          const hash = url.includes('#') ? url.split('#')[1] : url.split('?')[1];
+          const params = new URLSearchParams(hash);
+          const access_token = params.get('access_token');
+          const refresh_token = params.get('refresh_token');
+          if (access_token && refresh_token) {
+            const { data, error } = await supabase.auth.setSession({ access_token, refresh_token });
+            if (!error && data.session) {
+              await initialize();
+              router.replace('/(tabs)/robots' as any);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[DeepLink] Auth error:', e);
+      }
+    };
+
+    Linking.getInitialURL().then((url) => {
+      if (url) handleUrl({ url });
+    });
+
+    const subscription = Linking.addEventListener('url', handleUrl);
+    return () => subscription.remove();
+  }, [initialize, router]);
 
   useEffect(() => {
     if (isLoading) return;

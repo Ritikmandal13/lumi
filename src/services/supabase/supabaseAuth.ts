@@ -16,10 +16,12 @@ let pendingEmail: string = '';
 export const supabaseAuthService: AuthService = {
   async signUp(fullName: string, email: string, password: string): Promise<User> {
     pendingEmail = email.trim();
+    const redirectUrl = Linking.createURL('/');
     const { data, error } = await supabase.auth.signUp({
       email: pendingEmail,
       password,
       options: {
+        emailRedirectTo: redirectUrl,
         data: {
           full_name: fullName.trim(),
         },
@@ -85,7 +87,10 @@ export const supabaseAuthService: AuthService = {
   },
 
   async forgotPassword(email: string): Promise<void> {
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim());
+    const redirectUrl = Linking.createURL('/');
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: redirectUrl,
+    });
     if (error) {
       throw new Error(error.message);
     }

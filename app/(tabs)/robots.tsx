@@ -14,6 +14,7 @@ import {
   Pressable,
   Platform,
   StatusBar as RNStatusBar,
+  Alert,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -175,6 +176,35 @@ function RobotCard({ robot, index }: { robot: Robot; index: number }) {
             style={styles.menuButton}
             accessibilityLabel="Robot menu"
             hitSlop={8}
+            onPress={(e) => {
+              e?.stopPropagation?.();
+              Alert.alert(
+                robot.name,
+                'Robot Options',
+                [
+                  {
+                    text: 'Drive LUMI 🎮',
+                    onPress: () => router.push(`/robot/${robot.id}/drive` as any),
+                  },
+                  {
+                    text: 'Dashboard & Telemetry',
+                    onPress: () => router.push(`/robot/${robot.id}` as any),
+                  },
+                  {
+                    text: 'Settings & Appearance',
+                    onPress: () => router.push(`/robot/${robot.id}/settings` as any),
+                  },
+                  {
+                    text: 'Manage Members & Access',
+                    onPress: () => router.push(`/robot/${robot.id}/members` as any),
+                  },
+                  {
+                    text: 'Cancel',
+                    style: 'cancel',
+                  },
+                ]
+              );
+            }}
           >
             <MoreVertical size={20} color={colors.textSecondary} />
           </Pressable>
@@ -193,7 +223,10 @@ function RobotCard({ robot, index }: { robot: Robot; index: number }) {
             variant={canConnect ? 'primary' : 'secondary'}
             size="medium"
             disabled={!canConnect}
-            onPress={() => router.push(`/robot/${robot.id}/live` as any)}
+            onPress={(e) => {
+              e?.stopPropagation?.();
+              router.push(`/robot/${robot.id}/drive` as any);
+            }}
           />
         </View>
       </Pressable>
