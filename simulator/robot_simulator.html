@@ -431,7 +431,18 @@
             log('🎙️ User speaking! Playing voice through robot speaker...', 'emote');
             const audioEl = track.attach();
             audioEl.id = `audio_${track.sid}`;
+            audioEl.volume = 1.0;
             document.body.appendChild(audioEl);
+
+            // Ensure browser autoplay policy does not block audio
+            audioEl.play().catch((err) => {
+              console.warn('[Audio] Autoplay blocked by browser. User interaction needed:', err);
+              log('⚠️ Browser blocked audio autoplay. Click anywhere on the simulator page to enable sound!', 'warning');
+            });
+
+            if (room.canPlaybackAudio === false) {
+              room.startAudio().catch(() => {});
+            }
           }
         });
 
@@ -441,6 +452,13 @@
             log('User released mic (muted)', 'stop');
           }
         });
+
+        // Global interaction listener to unlock audio if previously blocked
+        document.addEventListener('click', () => {
+          if (room && room.canPlaybackAudio === false) {
+            room.startAudio().catch(() => {});
+          }
+        }, { once: false });
 
         room.on(LivekitClient.RoomEvent.Connected, async () => {
           setConnectionStatus('online', 'LiveKit Streaming');
