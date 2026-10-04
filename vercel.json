@@ -1,18 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "cleanUrls": true,
-  "rewrites": [
-    {
-      "source": "/",
-      "destination": "/simulator/index.html"
-    },
-    {
-      "source": "/simulator",
-      "destination": "/simulator/index.html"
-    },
-    {
-      "source": "/robot_simulator.html",
-      "destination": "/simulator/robot_simulator.html"
-    }
-  ]
+  "outputDirectory": "simulator",
+  "cleanUrls": true
 }
