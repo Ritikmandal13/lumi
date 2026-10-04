@@ -12,7 +12,6 @@ import {
   Pressable,
   KeyboardAvoidingView,
   Platform,
-  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -31,6 +30,8 @@ import { robotService } from '../src/services';
 import { OtpInput } from '../src/components/OtpInput';
 import { Button } from '../src/components/Button';
 import { RobotFace } from '../src/components/RobotFace';
+import { showAlert } from '../src/features/dialog/dialogStore';
+import { haptics } from '../src/utils/haptics';
 import type { Robot } from '../src/types';
 
 export default function JoinScreen() {
@@ -63,17 +64,23 @@ export default function JoinScreen() {
 
   const handleAccept = () => {
     if (!previewRobot) return;
-    Alert.alert('Joined!', `You now have access to control ${previewRobot.name}.`, [
-      {
-        text: 'View Robot',
-        onPress: () => {
-          router.replace({
-            pathname: '/robot/[id]',
-            params: { id: previewRobot.id },
-          });
+    haptics.success();
+    showAlert(
+      'Joined!',
+      `You now have access to control ${previewRobot.name}.`,
+      [
+        {
+          text: 'View Robot',
+          onPress: () => {
+            router.replace({
+              pathname: '/robot/[id]',
+              params: { id: previewRobot.id },
+            });
+          },
         },
-      },
-    ]);
+      ],
+      'success'
+    );
   };
 
   return (

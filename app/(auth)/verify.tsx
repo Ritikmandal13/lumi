@@ -5,21 +5,21 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, Platform, StatusBar as RNStatusBar, Linking, Alert } from 'react-native';
+import { View, Text, StyleSheet, Platform, StatusBar as RNStatusBar, Linking } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, { FadeInDown } from 'react-native-reanimated';
-import { useTranslation } from 'react-i18next';
 import { Mail, ArrowRight, RefreshCw } from 'lucide-react-native';
 import { Button } from '../../src/components/Button';
 import { RobotFace } from '../../src/components/RobotFace';
 import { useTheme } from '../../src/theme';
 import { typography, spacing, radius } from '../../src/theme/tokens';
 import { useAuthStore } from '../../src/features/auth/useAuthStore';
+import { showAlert } from '../../src/features/dialog/dialogStore';
+import { haptics } from '../../src/utils/haptics';
 
 export default function VerifyEmailScreen() {
-  const { t } = useTranslation();
   const { theme, isDark } = useTheme();
   const insets = useSafeAreaInsets();
   const colors = theme.colors;
@@ -50,25 +50,28 @@ export default function VerifyEmailScreen() {
 
   const handleOpenEmailApp = async () => {
     try {
+      haptics.light();
       if (Platform.OS === 'android') {
         await Linking.openURL('mailto:');
       } else {
         await Linking.openURL('message:');
       }
     } catch {
-      Alert.alert('Open Email', 'Please check your email client for the LUMI verification link.');
+      showAlert('Open Email', 'Please check your email client for the LUMI verification link.', undefined, 'info');
     }
   };
 
   const handleResend = async () => {
     clearError();
     try {
+      haptics.light();
       await resendVerification(user?.email);
+      haptics.success();
       setResendSuccess(true);
       setResendCountdown(60);
       setTimeout(() => setResendSuccess(false), 5000);
     } catch (e: any) {
-      Alert.alert('Resend Failed', e.message || 'Could not resend email link.');
+      showAlert('Resend Failed', e.message || 'Could not resend email link.', undefined, 'error');
     }
   };
 
@@ -101,7 +104,7 @@ export default function VerifyEmailScreen() {
         </Text>
         
         <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-          We've sent a confirmation link to:
+          {"We've sent a confirmation link to:"}
         </Text>
         
         <View style={[styles.emailBox, { backgroundColor: colors.surface, borderColor: colors.border }]}>

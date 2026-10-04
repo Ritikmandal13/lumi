@@ -18,6 +18,7 @@ import {
 } from 'react-native';
 import { useColors } from '../theme';
 import { typography, spacing, radius } from '../theme/tokens';
+import { haptics } from '../utils/haptics';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'destructive';
 export type ButtonSize = 'large' | 'medium' | 'small' | 'lg' | 'md' | 'sm';
@@ -100,10 +101,23 @@ export function Button({
   const buttonHeight = isSmall ? 36 : isMed ? 48 : 56;
   const content = children != null ? children : title;
 
+  const handlePress = useCallback(
+    (e: any) => {
+      if (isDisabled) return;
+      if (isDanger) {
+        haptics.heavy();
+      } else {
+        haptics.light();
+      }
+      onPress?.(e);
+    },
+    [isDisabled, isDanger, onPress]
+  );
+
   return (
     <Pressable
       disabled={isDisabled}
-      onPress={onPress}
+      onPress={handlePress}
       accessibilityRole="button"
       accessibilityState={{ disabled: isDisabled, busy: loading }}
       style={({ pressed }) => [

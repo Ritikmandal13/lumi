@@ -11,7 +11,6 @@ import {
   StyleSheet,
   ScrollView,
   Pressable,
-  Alert,
   Modal,
   RefreshControl,
   Share,
@@ -34,6 +33,8 @@ import { useTheme } from '../../../src/theme';
 import { typography, spacing, radius } from '../../../src/theme/tokens';
 import { robotService } from '../../../src/services';
 import { Button } from '../../../src/components/Button';
+import { showAlert } from '../../../src/features/dialog/dialogStore';
+import { haptics } from '../../../src/utils/haptics';
 import type { RobotMember, Invite } from '../../../src/types';
 
 export default function MembersScreen() {
@@ -71,16 +72,19 @@ export default function MembersScreen() {
 
   const handleCreateInvite = async () => {
     try {
+      haptics.light();
       const inv = await robotService.createInvite(id as string, inviteExpiry);
+      haptics.success();
       setCreatedInvite(inv);
       queryClient.invalidateQueries({ queryKey: ['invites', id] });
     } catch (e: any) {
-      Alert.alert('Error', e.message || 'Failed to create invite');
+      showAlert('Error', e.message || 'Failed to create invite', undefined, 'error');
     }
   };
 
   const handleRevokeInvite = async (inviteId: string) => {
-    Alert.alert(
+    haptics.warning();
+    showAlert(
       t('share.revoke', 'Revoke'),
       'Are you sure you want to revoke this invite code?',
       [
@@ -89,16 +93,19 @@ export default function MembersScreen() {
           text: t('share.revoke', 'Revoke'),
           style: 'destructive',
           onPress: async () => {
+            haptics.medium();
             await robotService.revokeInvite(inviteId);
             queryClient.invalidateQueries({ queryKey: ['invites', id] });
           },
         },
       ],
+      'warning'
     );
   };
 
   const handleRemoveMember = async (member: RobotMember) => {
-    Alert.alert(
+    haptics.warning();
+    showAlert(
       t('share.removeAccess', 'Remove access'),
       `Remove ${member.fullName}'s access to this LUMI?`,
       [
@@ -107,11 +114,13 @@ export default function MembersScreen() {
           text: t('common.delete', 'Remove'),
           style: 'destructive',
           onPress: async () => {
+            haptics.medium();
             await robotService.removeMember(id as string, member.userId);
             queryClient.invalidateQueries({ queryKey: ['members', id] });
           },
         },
       ],
+      'warning'
     );
   };
 

@@ -15,7 +15,6 @@ import {
   Pressable,
   KeyboardAvoidingView,
   Platform,
-  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -37,6 +36,8 @@ import { TextField } from '../src/components/TextField';
 import { OtpInput } from '../src/components/OtpInput';
 import { RobotFace } from '../src/components/RobotFace';
 import { robotService } from '../src/services';
+import { showAlert } from '../src/features/dialog/dialogStore';
+import { haptics } from '../src/utils/haptics';
 import type { Robot } from '../src/types';
 
 const COLOR_OPTIONS: { key: RobotColorKey; label: string; hex: string }[] = [
@@ -75,11 +76,13 @@ export default function AddRobotScreen() {
 
     try {
       const robot = await robotService.pairRobot(code);
+      haptics.success();
       setPairedRobot(robot);
       setRobotName(robot.name || 'LUMI');
       setSelectedColor((robot.color as RobotColorKey) || 'violet');
       setStep(3);
     } catch (e: any) {
+      haptics.error();
       setCodeError(e.message || t('addRobot.wrongCode', "That code isn't right. Check LUMI's screen."));
     } finally {
       setIsVerifying(false);
@@ -90,7 +93,7 @@ export default function AddRobotScreen() {
   const handleFinishSetup = async () => {
     if (!pairedRobot) return;
     if (!robotName.trim()) {
-      Alert.alert('Required', 'Please give your LUMI a name');
+      showAlert('Required', 'Please give your LUMI a name', undefined, 'warning');
       return;
     }
 
@@ -102,10 +105,11 @@ export default function AddRobotScreen() {
         selectedColor,
         room.trim() || undefined,
       );
+      haptics.success();
       setPairedRobot(updated);
       setStep(4);
     } catch (e: any) {
-      Alert.alert('Error', e.message || 'Failed to save settings');
+      showAlert('Error', e.message || 'Failed to save settings', undefined, 'error');
     } finally {
       setIsSaving(false);
     }
@@ -267,12 +271,15 @@ export default function AddRobotScreen() {
               variant="ghost"
               size="md"
               fullWidth
-              onPress={() =>
-                Alert.alert(
+              onPress={() => {
+                haptics.light();
+                showAlert(
                   'Need Help?',
                   'Make sure your LUMI robot is powered on and connected to the same WiFi network. Once connected, a 6-digit code appears on its face screen.',
-                )
-              }
+                  undefined,
+                  'info'
+                );
+              }}
             >
               {t('addRobot.needHelp', 'I need help')}
             </Button>
@@ -323,12 +330,15 @@ export default function AddRobotScreen() {
             </View>
 
             <Pressable
-              onPress={() =>
-                Alert.alert(
+              onPress={() => {
+                haptics.light();
+                showAlert(
                   'Code Not Showing?',
                   'Double-tap the power button on the back of LUMI to cycle to the pairing code screen.',
-                )
-              }
+                  undefined,
+                  'info'
+                );
+              }}
               style={styles.helpLink}
             >
               <HelpCircle size={16} color={colors.primary} />
@@ -397,7 +407,10 @@ export default function AddRobotScreen() {
                     return (
                       <Pressable
                         key={c.key}
-                        onPress={() => setSelectedColor(c.key)}
+                        onPress={() => {
+                          haptics.selection();
+                          setSelectedColor(c.key);
+                        }}
                         style={[
                           styles.colorOption,
                           {

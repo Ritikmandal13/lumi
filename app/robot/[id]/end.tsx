@@ -11,7 +11,6 @@ import {
   Text,
   StyleSheet,
   Pressable,
-  Alert,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -29,6 +28,8 @@ import { typography, spacing, radius, robotColors } from '../../../src/theme/tok
 import { sessionService } from '../../../src/services';
 import { RobotFace } from '../../../src/components/RobotFace';
 import { Button } from '../../../src/components/Button';
+import { showAlert } from '../../../src/features/dialog/dialogStore';
+import { haptics } from '../../../src/utils/haptics';
 
 export default function SessionEndScreen() {
   const { id, sessionId, duration, robotName } = useLocalSearchParams<{
@@ -54,6 +55,10 @@ export default function SessionEndScreen() {
       : `${remainingSecs}s`;
 
   const handleRate = async (selected: 'great' | 'ok' | 'problem') => {
+    if (selected === 'great') haptics.success();
+    else if (selected === 'ok') haptics.light();
+    else haptics.warning();
+
     setRating(selected);
     if (sessionId) {
       try {
@@ -221,12 +226,15 @@ export default function SessionEndScreen() {
 
           {rating === 'problem' && (
             <Pressable
-              onPress={() =>
-                Alert.alert(
+              onPress={() => {
+                haptics.light();
+                showAlert(
                   'Report a Problem',
                   'Thanks for reporting. We logged network telemetry from this session to help improve connection stability.',
-                )
-              }
+                  undefined,
+                  'info'
+                );
+              }}
               style={styles.problemReportLink}
             >
               <MessageSquare size={14} color={colors.primary} />

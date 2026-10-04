@@ -11,6 +11,7 @@ import { StatusBar } from 'expo-status-bar';
 import { Bot, History, Settings } from 'lucide-react-native';
 import { useColors, useTheme } from '../../src/theme';
 import { typography } from '../../src/theme/tokens';
+import { haptics } from '../../src/utils/haptics';
 
 export default function TabsLayout() {
   const colors = useColors();
@@ -35,6 +36,11 @@ export default function TabsLayout() {
     <>
       <StatusBar style={isDark ? 'light' : 'dark'} />
       <Tabs
+        screenListeners={{
+          tabPress: () => {
+            haptics.selection();
+          },
+        }}
         screenOptions={{
           headerShown: false,
           tabBarActiveTintColor: colors.primary,

@@ -12,7 +12,6 @@ import {
   ScrollView,
   Pressable,
   Switch,
-  Alert,
   Modal,
   Platform,
   StatusBar as RNStatusBar,
@@ -41,6 +40,8 @@ import { typography, spacing, radius } from '../../src/theme/tokens';
 import { useAuthStore } from '../../src/features/auth/useAuthStore';
 import { Button } from '../../src/components/Button';
 import { TextField } from '../../src/components/TextField';
+import { showAlert } from '../../src/features/dialog/dialogStore';
+import { haptics } from '../../src/utils/haptics';
 
 export default function SettingsScreen() {
   const { theme, preference, setPreference, isDark } = useTheme();
@@ -73,7 +74,7 @@ export default function SettingsScreen() {
   const [isDeleting, setIsDeleting] = useState(false);
 
   const handleLogout = () => {
-    Alert.alert(
+    showAlert(
       t('auth.logOut', 'Log out'),
       'Are you sure you want to log out of LUMI?',
       [
@@ -87,16 +88,17 @@ export default function SettingsScreen() {
           },
         },
       ],
+      'warning'
     );
   };
 
   const handleDeleteAccount = async () => {
     if (deleteConfirmText.trim().toUpperCase() !== 'DELETE') {
-      Alert.alert('Error', 'Please type DELETE to confirm.');
+      showAlert('Required', 'Please type DELETE to confirm.', undefined, 'warning');
       return;
     }
     if (!deletePassword) {
-      Alert.alert('Error', 'Please enter your password.');
+      showAlert('Password Required', 'Please enter your password to proceed.', undefined, 'warning');
       return;
     }
 
@@ -106,7 +108,7 @@ export default function SettingsScreen() {
       setShowDeleteModal(false);
       router.replace('/(auth)/login');
     } catch (e: any) {
-      Alert.alert('Error', e.message || 'Failed to delete account');
+      showAlert('Failed', e.message || 'Failed to delete account', undefined, 'danger');
     } finally {
       setIsDeleting(false);
     }
@@ -265,7 +267,10 @@ export default function SettingsScreen() {
           <View style={[styles.divider, { backgroundColor: colors.border }]} />
 
           <Pressable
-            onPress={() => Alert.alert('Privacy Policy', 'LUMI stores minimal session data and adheres to top privacy standards.')}
+            onPress={() => {
+              haptics.light();
+              showAlert('Privacy Policy', 'LUMI stores minimal session data and adheres to top privacy standards.', undefined, 'info');
+            }}
             style={({ pressed }) => [
               styles.rowItem,
               pressed && { backgroundColor: colors.surfaceAlt },
@@ -283,7 +288,10 @@ export default function SettingsScreen() {
           <View style={[styles.divider, { backgroundColor: colors.border }]} />
 
           <Pressable
-            onPress={() => Alert.alert('Terms of Service', 'By using LUMI, you agree to responsible robot operation rules.')}
+            onPress={() => {
+              haptics.light();
+              showAlert('Terms of Service', 'By using LUMI, you agree to responsible robot operation rules.', undefined, 'info');
+            }}
             style={({ pressed }) => [
               styles.rowItem,
               pressed && { backgroundColor: colors.surfaceAlt },

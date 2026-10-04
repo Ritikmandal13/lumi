@@ -12,7 +12,6 @@ import {
   ScrollView,
   Pressable,
   Switch,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -27,6 +26,8 @@ import { useTheme } from '../../../src/theme';
 import { typography, spacing, radius, robotColors, type RobotColorKey } from '../../../src/theme/tokens';
 import { robotService } from '../../../src/services';
 import { TextField } from '../../../src/components/TextField';
+import { showAlert } from '../../../src/features/dialog/dialogStore';
+import { haptics } from '../../../src/utils/haptics';
 import type { Robot } from '../../../src/types';
 
 const COLOR_KEYS: RobotColorKey[] = ['violet', 'mint', 'coral', 'amber', 'sky', 'rose'];
@@ -54,7 +55,7 @@ function SettingsForm({ robot, id }: SettingsFormProps) {
 
   const handleSaveGeneral = async () => {
     if (!name.trim()) {
-      Alert.alert('Required', 'Please enter a name for your LUMI.');
+      showAlert('Required', 'Please enter a name for your LUMI.', undefined, 'warning');
       return;
     }
     try {
@@ -63,16 +64,18 @@ function SettingsForm({ robot, id }: SettingsFormProps) {
       await robotService.updateRobotSettings(id, { remoteAccessEnabled: remoteAccess });
       queryClient.invalidateQueries({ queryKey: ['robot', id] });
       queryClient.invalidateQueries({ queryKey: ['robots'] });
-      Alert.alert('Success', 'Robot settings saved successfully.');
+      haptics.success();
+      showAlert('Success', 'Robot settings saved successfully.', undefined, 'success');
     } catch (e: any) {
-      Alert.alert('Error', e.message || 'Failed to save settings');
+      showAlert('Error', e.message || 'Failed to save settings', undefined, 'error');
     } finally {
       setIsSaving(false);
     }
   };
 
   const handleRemoveRobot = () => {
-    Alert.alert(
+    haptics.warning();
+    showAlert(
       t('robotSettings.removeLumi', 'Remove LUMI'),
       t(
         'robotSettings.removeWarning',
@@ -85,15 +88,17 @@ function SettingsForm({ robot, id }: SettingsFormProps) {
           style: 'destructive',
           onPress: async () => {
             try {
+              haptics.medium();
               await robotService.removeRobot(id);
               queryClient.invalidateQueries({ queryKey: ['robots'] });
               router.replace('/(tabs)/robots');
             } catch (e: any) {
-              Alert.alert('Error', e.message || 'Failed to remove robot');
+              showAlert('Error', e.message || 'Failed to remove robot', undefined, 'error');
             }
           },
         },
       ],
+      'warning'
     );
   };
 
@@ -170,7 +175,10 @@ function SettingsForm({ robot, id }: SettingsFormProps) {
               {COLOR_KEYS.map((k) => (
                 <Pressable
                   key={k}
-                  onPress={() => setColor(k)}
+                  onPress={() => {
+                    haptics.selection();
+                    setColor(k);
+                  }}
                   style={[
                     styles.colorDotWrapper,
                     {
@@ -289,12 +297,15 @@ function SettingsForm({ robot, id }: SettingsFormProps) {
           <View style={[styles.divider, { backgroundColor: colors.border }]} />
 
           <Pressable
-            onPress={() =>
-              Alert.alert(
+            onPress={() => {
+              haptics.light();
+              showAlert(
                 t('robotSettings.checkUpdate', 'Check for update'),
                 t('robotSettings.upToDate', 'Your LUMI firmware is up to date.'),
-              )
-            }
+                undefined,
+                'info'
+              );
+            }}
             style={({ pressed }) => [
               styles.pressableRow,
               pressed && { backgroundColor: colors.surfaceAlt },
@@ -308,16 +319,25 @@ function SettingsForm({ robot, id }: SettingsFormProps) {
           <View style={[styles.divider, { backgroundColor: colors.border }]} />
 
           <Pressable
-            onPress={() =>
-              Alert.alert(
+            onPress={() => {
+              haptics.warning();
+              showAlert(
                 t('robotSettings.restartLumi', 'Restart LUMI'),
                 'LUMI will reboot. It will reconnect in about 30 seconds.',
                 [
                   { text: t('common.cancel', 'Cancel'), style: 'cancel' },
-                  { text: 'Restart', onPress: () => Alert.alert('Sent', 'Restart command sent.') },
+                  {
+                    text: 'Restart',
+                    style: 'destructive',
+                    onPress: () => {
+                      haptics.medium();
+                      showAlert('Sent', 'Restart command sent.', undefined, 'success');
+                    },
+                  },
                 ],
-              )
-            }
+                'warning'
+              );
+            }}
             style={({ pressed }) => [
               styles.pressableRow,
               pressed && { backgroundColor: colors.surfaceAlt },

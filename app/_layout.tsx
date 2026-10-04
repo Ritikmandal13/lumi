@@ -33,6 +33,7 @@ import '../src/lib/i18n';
 import { Platform } from 'react-native';
 import * as Linking from 'expo-linking';
 import { supabase } from '../src/lib/supabase';
+import { CustomDialogHost } from '../src/components/CustomDialogHost';
 
 if (Platform.OS !== 'web') {
   // Initialize WebRTC globals for LiveKit on native platforms
@@ -191,6 +192,7 @@ function RootLayoutNav() {
           options={{ headerShown: false }}
         />
       </Stack>
+      <CustomDialogHost />
     </>
   );
 }

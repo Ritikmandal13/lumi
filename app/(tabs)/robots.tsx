@@ -14,7 +14,6 @@ import {
   Pressable,
   Platform,
   StatusBar as RNStatusBar,
-  Alert,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -40,6 +39,8 @@ import { useTheme } from '../../src/theme';
 import { typography, spacing, radius, robotColors } from '../../src/theme/tokens';
 import { robotService } from '../../src/services';
 import { useAuthStore } from '../../src/features/auth/useAuthStore';
+import { showAlert } from '../../src/features/dialog/dialogStore';
+import { haptics } from '../../src/utils/haptics';
 import type { Robot, RobotColorKey } from '../../src/types';
 
 function timeAgo(date: string): string {
@@ -178,9 +179,10 @@ function RobotCard({ robot, index }: { robot: Robot; index: number }) {
             hitSlop={8}
             onPress={(e) => {
               e?.stopPropagation?.();
-              Alert.alert(
+              haptics.medium();
+              showAlert(
                 robot.name,
-                'Robot Options',
+                'Choose an action for this robot:',
                 [
                   {
                     text: 'Drive LUMI 🎮',
@@ -202,7 +204,8 @@ function RobotCard({ robot, index }: { robot: Robot; index: number }) {
                     text: 'Cancel',
                     style: 'cancel',
                   },
-                ]
+                ],
+                'info'
               );
             }}
           >

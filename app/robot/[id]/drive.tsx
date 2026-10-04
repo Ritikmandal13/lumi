@@ -13,7 +13,6 @@ import {
   StyleSheet,
   Pressable,
   PanResponder,
-  Alert,
   Modal,
   ScrollView,
   Platform,
@@ -63,6 +62,8 @@ import {
   subscribeToRobotVideoTrack,
   setRobotMicrophone,
 } from '../../../src/services';
+import { showAlert } from '../../../src/features/dialog/dialogStore';
+import { haptics } from '../../../src/utils/haptics';
 import { RobotFace, type Emotion } from '../../../src/components/RobotFace';
 import type { Robot, ConnectionState, Telemetry } from '../../../src/types';
 
@@ -195,11 +196,11 @@ export default function DriveScreen() {
             }
           },
           onError: (err) => {
-            Alert.alert('Connection Error', err);
+            showAlert('Connection Error', err, undefined, 'warning');
           },
         });
       } catch (err: any) {
-        Alert.alert('Error', err.message || 'Failed to connect');
+        showAlert('Connection Failed', err.message || 'Failed to connect to LUMI', undefined, 'danger');
       }
     }
 
@@ -284,6 +285,7 @@ export default function DriveScreen() {
 
   // Emergency Stop
   const handleEmergencyStop = () => {
+    haptics.heavy();
     puckX.value = withSpring(0);
     puckY.value = withSpring(0);
     controlChannel.send({ t: 'stop' });
@@ -291,13 +293,14 @@ export default function DriveScreen() {
 
   // End Session flow
   const handleConfirmEndSession = () => {
-    Alert.alert(
+    haptics.warning();
+    showAlert(
       t('live.endSessionConfirm', 'End this session?'),
       `Session duration: ${formatTimer(elapsedSeconds)}`,
       [
         { text: t('live.keepDriving', 'Keep driving'), style: 'cancel' },
         {
-          text: t('live.end', 'End'),
+          text: t('live.end', 'End Session'),
           style: 'destructive',
           onPress: async () => {
             await liveService.disconnect();
@@ -324,15 +327,18 @@ export default function DriveScreen() {
           },
         },
       ],
+      'warning'
     );
   };
 
   const handleSendEmotion = (emotion: Emotion) => {
+    haptics.medium();
     setActiveEmotion(emotion);
     controlChannel.sendEmotion(emotion);
   };
 
   const handleSendGesture = (gestureName: string) => {
+    haptics.medium();
     controlChannel.sendGesture(gestureName);
   };
 
@@ -475,7 +481,10 @@ export default function DriveScreen() {
             ].map(({ val, label }) => (
               <Pressable
                 key={val}
-                onPress={() => setSpeedMultiplier(val)}
+                onPress={() => {
+                  haptics.selection();
+                  setSpeedMultiplier(val);
+                }}
                 style={[
                   styles.speedChip,
                   speedMultiplier === val && styles.speedChipActive,
