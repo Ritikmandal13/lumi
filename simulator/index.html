@@ -357,10 +357,11 @@
             startPairingPoll(lumiId, deviceSecret);
           } else if (data.status === 'paired') {
             document.getElementById('oledCode').innerText = 'PAIRED';
-            document.getElementById('oledDesc').innerText = 'Ready for LiveKit';
+            document.getElementById('oledDesc').innerText = 'Streaming to LiveKit';
             setConnectionStatus('online', 'Robot Paired');
             document.getElementById('btnConnectLivekit').disabled = false;
-            log('Robot is already paired! Ready to connect stream.', 'drive');
+            log('Robot is already paired! Auto-connecting LiveKit stream...', 'drive');
+            connectLiveKit();
           }
         } else {
           log(`Error: ${JSON.stringify(data)}`, 'stop');
