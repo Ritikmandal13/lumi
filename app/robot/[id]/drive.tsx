@@ -17,7 +17,9 @@ import {
   Modal,
   ScrollView,
   Platform,
+  PermissionsAndroid,
 } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
@@ -126,6 +128,31 @@ export default function DriveScreen() {
   useEffect(() => {
     setRobotMicrophone(isTalking || isMicLocked);
   }, [isTalking, isMicLocked]);
+
+  const ensureMicrophonePermission = async (): Promise<boolean> => {
+    if (Platform.OS === 'android') {
+      try {
+        const hasPermission = await PermissionsAndroid.check(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+        );
+        if (hasPermission) return true;
+        const status = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone Permission',
+            message: 'LUMI needs access to your microphone so you can talk through your robot.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Deny',
+          }
+        );
+        return status === PermissionsAndroid.RESULTS.GRANTED;
+      } catch (err) {
+        console.warn('[PTT] Permission error:', err);
+        return false;
+      }
+    }
+    return true;
+  };
 
   // Actions Drawer
   const [showDrawer, setShowDrawer] = useState(false);
@@ -516,12 +543,23 @@ export default function DriveScreen() {
               />
 
               <Pressable
-                onPressIn={() => {
-                  if (!isMicLocked) setIsTalking(true);
+                onPressIn={async () => {
+                  if (!isMicLocked) {
+                    const ok = await ensureMicrophonePermission();
+                    if (ok) {
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+                      setIsTalking(true);
+                    }
+                  }
                 }}
                 onPressOut={() => {
-                  if (!isMicLocked) setIsTalking(false);
+                  if (!isMicLocked) {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+                    setIsTalking(false);
+                  }
                 }}
+                pressRetentionOffset={{ top: 30, bottom: 30, left: 30, right: 30 }}
+                hitSlop={10}
                 style={[
                   styles.pttMainBtn,
                   {

@@ -425,6 +425,23 @@
           }
         });
 
+        // Handle incoming voice audio from mobile user (Push-To-Talk)
+        room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+          if (track.kind === LivekitClient.Track.Kind.Audio) {
+            log('🎙️ User speaking! Playing voice through robot speaker...', 'emote');
+            const audioEl = track.attach();
+            audioEl.id = `audio_${track.sid}`;
+            document.body.appendChild(audioEl);
+          }
+        });
+
+        room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
+          if (track.kind === LivekitClient.Track.Kind.Audio) {
+            track.detach().forEach((el) => el.remove());
+            log('User released mic (muted)', 'stop');
+          }
+        });
+
         room.on(LivekitClient.RoomEvent.Connected, async () => {
           setConnectionStatus('online', 'LiveKit Streaming');
           log(`Connected to room: ${room.name}! Publishing video...`, 'drive');
