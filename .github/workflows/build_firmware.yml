@@ -16,6 +16,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Configure safe directory
+        run: git config --global --add safe.directory '*'
+
       - name: Build Firmware with ESP-IDF
         working-directory: firmware/esp_idf_lumi
         run: |

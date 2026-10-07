@@ -11,4 +11,5 @@ idf_component_register(
         json
         esp32-camera
         driver
+        livekit
 )
