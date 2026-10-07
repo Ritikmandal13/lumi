@@ -80,6 +80,8 @@ const char* DEVICE_SECRET     = "x8K2mP9vL4qR7tW1zY5bN3cF6hJ0sD"; // Unique 32-c
 // ==============================================================================
 
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
+bool oledReady = false;
+uint8_t activeOledAddr = 0x3C;
 String currentPairingCode = "------";
 bool isPaired = false;
 unsigned long lastHeartbeat = 0;
@@ -164,20 +166,66 @@ void applyDifferentialDrive(float x, float y) {
 // ==============================================================================
 
 void initOLED() {
-  Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println("[OLED] SSD1306 allocation failed (try 0x3D or check wiring).");
-  } else {
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setCursor(24, 28);
-    display.println("LUMI BOOTING...");
-    display.display();
+  Serial.println("\n[OLED] Scanning I2C bus on SDA=GPIO 21, SCL=GPIO 47...");
+  Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN, 100000); // 100 kHz standard clock
+  delay(50);
+
+  int devicesFound = 0;
+  uint8_t foundAddr = 0;
+
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    byte error = Wire.endTransmission();
+    if (error == 0) {
+      Serial.printf("[I2C] -> Found active device at address: 0x%02X\n", addr);
+      devicesFound++;
+      if (addr == 0x3C || addr == 0x3D) {
+        foundAddr = addr;
+      }
+    }
   }
+
+  if (devicesFound == 0) {
+    Serial.println("⚠️ [OLED] WARNING: No I2C devices detected on SDA=21, SCL=47!");
+    Serial.println("👉 Troubleshooting steps:");
+    Serial.println("   1. Check VCC wire: If module has an onboard 662K LDO, connect VCC to 5V rail instead of 3.3V.");
+    Serial.println("   2. Verify pinout order: Ensure GND and VCC are not swapped (modules vary between GND-VCC and VCC-GND).");
+    Serial.println("   3. Check SDA (GPIO 21) and SCL (GPIO 47) jumper wires.");
+  }
+
+  // Try detected address first, then try 0x3C and 0x3D as fallback
+  uint8_t addrsToTry[2];
+  if (foundAddr != 0) {
+    addrsToTry[0] = foundAddr;
+    addrsToTry[1] = (foundAddr == 0x3C) ? 0x3D : 0x3C;
+  } else {
+    addrsToTry[0] = 0x3C;
+    addrsToTry[1] = 0x3D;
+  }
+
+  for (int i = 0; i < 2; i++) {
+    uint8_t a = addrsToTry[i];
+    Serial.printf("[OLED] Attempting display.begin at 0x%02X...\n", a);
+    if (display.begin(SSD1306_SWITCHCAPVCC, a)) {
+      activeOledAddr = a;
+      oledReady = true;
+      Serial.printf("🎉 [OLED] Display successfully initialized at 0x%02X!\n", a);
+      display.clearDisplay();
+      display.setTextColor(SSD1306_WHITE);
+      display.setTextSize(1);
+      display.setCursor(22, 28);
+      display.println("LUMI BOOTING...");
+      display.display();
+      return;
+    }
+  }
+
+  Serial.println("❌ [OLED] Initialization failed at both 0x3C and 0x3D.");
+  Serial.println("   If device was found during I2C scan, the display likely uses an SH1106 controller IC.");
 }
 
 void showPairingScreen(String code) {
+  if (!oledReady) return;
   display.clearDisplay();
 
   // Header Title
@@ -207,6 +255,7 @@ void showPairingScreen(String code) {
 }
 
 void showHappyEyes() {
+  if (!oledReady) return;
   display.clearDisplay();
 
   // Draw two friendly robot eyes
@@ -499,10 +548,12 @@ void setup() {
 
   // 2. Connect Wi-Fi
   Serial.printf("[Wi-Fi] Connecting to %s...\n", WIFI_SSID);
-  display.clearDisplay();
-  display.setCursor(18, 28);
-  display.println("Connecting Wi-Fi");
-  display.display();
+  if (oledReady) {
+    display.clearDisplay();
+    display.setCursor(18, 28);
+    display.println("Connecting Wi-Fi");
+    display.display();
+  }
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   int retries = 0;
@@ -522,10 +573,12 @@ void setup() {
     callRegisterRobot();
   } else {
     Serial.println("\n[Wi-Fi] Connection failed. Check SSID/Password.");
-    display.clearDisplay();
-    display.setCursor(12, 28);
-    display.println("Wi-Fi Failed!");
-    display.display();
+    if (oledReady) {
+      display.clearDisplay();
+      display.setCursor(12, 28);
+      display.println("Wi-Fi Failed!");
+      display.display();
+    }
   }
 }
 
