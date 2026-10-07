@@ -25,9 +25,9 @@
 // 1. CONFIGURATION & CREDENTIALS
 // ==============================================================================
 
-// Replace with client's Wi-Fi network credentials
-const char* WIFI_SSID     = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+// Client's Wi-Fi hotspot credentials
+const char* WIFI_SSID     = "Anmol's S24 FE";
+const char* WIFI_PASSWORD = "11111111";
 
 // Supabase Cloud Configuration
 const char* SUPABASE_BASE_URL = "https://ehqqlxcdscgsebiodxfk.supabase.co";
