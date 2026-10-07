@@ -19,9 +19,9 @@ This guide provides the complete hardware & firmware specification for connectin
          │                               └──────────────────────┘
          ▼                                           ▲
 ┌─────────────────┐                                  │
-│  LiveKit Cloud  │◀─────────────────────────────────┘
+│  LiveKit Cloud  │◀────────────────────────────────┘
 │  Audio/Video/   │
-│  Control Channel│◀─────────────────────────────────┐
+│  Control Channel│◀────────────────────────────────┐
 └─────────────────┘                                  │
          ▲                                           │
          │ WebRTC Data & AV                          │ JWT
@@ -39,34 +39,21 @@ The robot interacts with two cloud services:
 
 ---
 
-## 2. Hardware Specification & Verified Pinout Table
+## 2. Hardware & Toolchain Prerequisites
 
-### Verified Prototype Hardware:
-- **Board**: `GOOUUU ESP32-S3-CAM V1.5` (`ESP32-S3 N16R8` with 16MB Flash + 8MB Octal PSRAM)
-- **Camera**: Built-in `OV3660` (fixed on-board wiring: GPIO 4–13, 15–18)
-- **Ready-to-Flash Arduino Sketch**: [`firmware/LUMI_ESP32_S3/LUMI_ESP32_S3.ino`](file:///c:/Users/ritik/OneDrive/Desktop/lumi/firmware/LUMI_ESP32_S3/LUMI_ESP32_S3.ino)
-
-### Verified Pinout Mapping (from `LUMI_Connection_Table.pdf`):
-
-| Subsystem | Signal | GPIO Pin | Voltage / Notes |
-| :--- | :--- | :--- | :--- |
-| **OLED (I2C)** | `SDA` | **GPIO 21** | 3.3V rail (Address `0x3C`) |
-| | `SCL` | **GPIO 47** | 3.3V rail |
-| **I2S Mic (INMP441)** | `SD` (Data In) | **GPIO 1** | 3.3V rail (**Never 5V**) |
-| | `SCK` (Bit Clock) | **GPIO 41** | *Shared with Amp BCLK* |
-| | `WS` (Word Select) | **GPIO 42** | *Shared with Amp LRC* |
-| | `L/R` | **GND rail** | Selects Left Channel |
-| **I2S Amp (MAX98357A)** | `DIN` (Data Out) | **GPIO 14** | 5V rail |
-| | `BCLK` | **GPIO 41** | *Shared with Mic SCK* |
-| | `LRC` | **GPIO 42** | *Shared with Mic WS* |
-| **Motors (L298N H-Bridge)** | `IN1` (Left PWM) | **GPIO 38** | Speed & Direction PWM |
-| | `IN2` (Left PWM) | **GPIO 39** | Speed & Direction PWM |
-| | `IN3` (Right PWM) | **GPIO 40** | Speed & Direction PWM |
-| | `IN4` (Right PWM) | **GPIO 48** | Speed & Direction PWM |
-| | `ENA` / `ENB` | Jumper Caps ON | Speed is PWM on IN1–IN4 |
-| | `5V-Enable Jumper` | **Removed** | 5V supplied externally at 5V terminal |
-
-> ⚠️ **Reserved / Do Not Use Pins**: GPIO 35, 36, 37 (Octal PSRAM), GPIO 19, 20 (USB), GPIO 43, 44 (Serial CH340), GPIO 0, 3, 45, 46 (Strapping / Boot pins).
+- **SoC**: ESP32-S3 or ESP32-P4 (recommended 8MB or 16MB Octal PSRAM + 16MB Flash).
+- **Wi-Fi**: 2.4 GHz 802.11 b/g/n (ESP32-S3 only supports 2.4 GHz).
+- **ESP-IDF**: Version **5.4 or later**.
+- **LiveKit ESP-IDF Component**: Install via IDF Component Manager:
+  ```bash
+  idf.py add-dependency "livekit/livekit>=0.1.0"
+  ```
+- **Peripherals**:
+  - Camera (e.g. OV2640 / OV5640 via DVP or MIPI-CSI)
+  - Display (OLED / LCD over SPI or I2C) to display the 6-digit pairing code
+  - I2S Microphone (e.g. INMP441)
+  - I2S Audio Amplifier (e.g. MAX98357A)
+  - Dual DC Motor Driver (H-Bridge via PWM / MCPWM)
 
 ---
 
