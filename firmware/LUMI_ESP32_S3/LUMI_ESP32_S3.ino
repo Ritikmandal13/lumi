@@ -177,61 +177,52 @@ void initOLED() {
   }
 }
 
-void showPairingScreen(String code, String ipStr) {
+void showPairingScreen(String code) {
   display.clearDisplay();
 
   // Header Title
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(34, 2);
+  display.setCursor(34, 4);
   display.println("PAIR LUMI");
 
   // Divider Line
-  display.drawFastHLine(10, 13, 108, SSD1306_WHITE);
+  display.drawFastHLine(10, 16, 108, SSD1306_WHITE);
 
   // Big 6-Digit Code (e.g. "482 917")
   display.setTextSize(2);
-  display.setCursor(20, 18);
+  display.setCursor(22, 26);
   String formatted = code;
   if (code.length() == 6) {
     formatted = code.substring(0, 3) + " " + code.substring(3);
   }
   display.println(formatted);
 
-  // IP display
-  display.setTextSize(1);
-  display.setCursor(10, 38);
-  display.print("IP: ");
-  display.println(ipStr);
-
   // Bottom prompt
+  display.setTextSize(1);
   display.setCursor(14, 52);
   display.println("Enter code in app");
 
   display.display();
 }
 
-void showHappyEyes(String ipStr) {
+void showHappyEyes() {
   display.clearDisplay();
 
   // Draw two friendly robot eyes
   // Left eye
-  display.fillRoundRect(24, 12, 30, 28, 8, SSD1306_WHITE);
-  display.fillCircle(39, 26, 6, SSD1306_BLACK);
+  display.fillRoundRect(24, 18, 30, 28, 8, SSD1306_WHITE);
+  display.fillCircle(39, 32, 6, SSD1306_BLACK);
 
   // Right eye
-  display.fillRoundRect(74, 12, 30, 28, 8, SSD1306_WHITE);
-  display.fillCircle(89, 26, 6, SSD1306_BLACK);
+  display.fillRoundRect(74, 18, 30, 28, 8, SSD1306_WHITE);
+  display.fillCircle(89, 32, 6, SSD1306_BLACK);
 
   // Status footer
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(28, 44);
+  display.setCursor(34, 54);
   display.println("LUMI ONLINE");
-
-  display.setCursor(12, 55);
-  display.print("IP: ");
-  display.println(ipStr);
 
   display.display();
 }
@@ -377,37 +368,6 @@ static esp_err_t stop_handler(httpd_req_t *req) {
   return httpd_resp_send(req, "{\"status\":\"stopped\"}", HTTPD_RESP_USE_STRLEN);
 }
 
-static esp_err_t index_handler(httpd_req_t *req) {
-  const char* html = 
-    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>LUMI ROBOT</title><style>"
-    "body{margin:0;background:#0f172a;color:#fff;font-family:sans-serif;text-align:center;}"
-    "h2{margin:12px 0 4px;font-size:20px;letter-spacing:1px;color:#38bdf8;}"
-    ".cam-box{width:95%;max-width:560px;margin:10px auto;border-radius:12px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,0.6);border:2px solid #334155;}"
-    "img{width:100%;display:block;}"
-    ".btns{display:grid;grid-template-columns:repeat(3,75px);grid-gap:10px;justify-content:center;margin:18px 0;}"
-    "button{background:#1e293b;color:#fff;border:2px solid #475569;border-radius:12px;padding:16px;font-size:18px;font-weight:bold;cursor:pointer;touch-action:manipulation;}"
-    "button:active{background:#38bdf8;color:#000;}"
-    ".stop-btn{background:#ef4444;border-color:#b91c1c;}"
-    "</style></head><body>"
-    "<h2>🤖 LUMI LIVE CAMERA</h2>"
-    "<div class='cam-box'><img src=':81/stream'></div>"
-    "<div class='btns'>"
-    "<div></div><button onpointerdown=\"d(0,1)\" onpointerup=\"s()\">⬆️</button><div></div>"
-    "<button onpointerdown=\"d(-1,0)\" onpointerup=\"s()\">⬅️</button>"
-    "<button class='stop-btn' onclick=\"s()\">🛑</button>"
-    "<button onpointerdown=\"d(1,0)\" onpointerup=\"s()\">➡️</button>"
-    "<div></div><button onpointerdown=\"d(0,-1)\" onpointerup=\"s()\">⬇️</button><div></div>"
-    "</div>"
-    "<script>"
-    "function d(x,y){fetch('/drive?x='+x+'&y='+y);}"
-    "function s(){fetch('/stop');}"
-    "</script></body></html>";
-
-  httpd_resp_set_type(req, "text/html");
-  return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
-}
-
 void startCameraServers() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 8;
@@ -426,21 +386,19 @@ void startCameraServers() {
 
   if (httpd_start(&stream_httpd, &stream_config) == ESP_OK) {
     httpd_register_uri_handler(stream_httpd, &stream_uri);
-    Serial.println("[Web Server] MJPEG Streamer started on port 81 (http://<IP>:81/stream)");
+    Serial.println("[Web Server] Camera Streamer active on port 81");
   }
 
   // 2. Control & Snapshot Server on Port 80
-  httpd_uri_t index_uri   = { .uri = "/",        .method = HTTP_GET, .handler = index_handler,   .user_ctx = NULL };
   httpd_uri_t capture_uri = { .uri = "/capture",  .method = HTTP_GET, .handler = capture_handler, .user_ctx = NULL };
   httpd_uri_t drive_uri   = { .uri = "/drive",    .method = HTTP_GET, .handler = drive_handler,   .user_ctx = NULL };
   httpd_uri_t stop_uri    = { .uri = "/stop",     .method = HTTP_GET, .handler = stop_handler,    .user_ctx = NULL };
 
   if (httpd_start(&control_httpd, &config) == ESP_OK) {
-    httpd_register_uri_handler(control_httpd, &index_uri);
     httpd_register_uri_handler(control_httpd, &capture_uri);
     httpd_register_uri_handler(control_httpd, &drive_uri);
     httpd_register_uri_handler(control_httpd, &stop_uri);
-    Serial.println("[Web Server] Control server started on port 80 (http://<IP>/)");
+    Serial.println("[Web Server] Drive control server active on port 80");
   }
 }
 
@@ -483,12 +441,12 @@ void callRegisterRobot() {
           Serial.println("📡 ROBOT IP ADDRESS : " + WiFi.localIP().toString());
           Serial.println("👉 Enter this 6-digit code in the LUMI Mobile App!");
           Serial.println("==================================================");
-          showPairingScreen(currentPairingCode, WiFi.localIP().toString());
+          showPairingScreen(currentPairingCode);
           isPaired = false;
         } else if (status && strcmp(status, "paired") == 0) {
           if (!isPaired) {
             Serial.println("🎉 Robot is paired to user account!");
-            showHappyEyes(WiFi.localIP().toString());
+            showHappyEyes();
             isPaired = true;
           }
         }
