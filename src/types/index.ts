@@ -22,6 +22,7 @@ export interface Robot {
   lastSeenAt: string; // ISO date
   ownerName: string;
   remoteAccessEnabled: boolean;
+  localIp?: string | null;
   capabilities: {
     emotions: string[];
     gestures: string[];

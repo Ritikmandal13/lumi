@@ -10,6 +10,7 @@ import {
   subscribeToRobotVideoTrack,
   getRobotVideoTrack,
   setRobotMicrophone,
+  setDirectRobotIp,
 } from './livekit/livekitService';
 
 import { supabaseAuthService } from './supabase/supabaseAuth';
@@ -39,7 +40,8 @@ export {
   subscribeToRobotVideoTrack,
   getRobotVideoTrack,
   setRobotMicrophone,
-};
+  setDirectRobotIp,
+} from './livekit/livekitService';
 
 export type {
   AuthService,

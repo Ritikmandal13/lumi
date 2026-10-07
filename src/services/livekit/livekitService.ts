@@ -254,8 +254,27 @@ export const livekitLiveService: LiveService = {
   },
 };
 
+let directRobotIp: string | null = null;
+
+export function setDirectRobotIp(ip: string | null): void {
+  directRobotIp = ip;
+}
+
+export function getDirectRobotIp(): string | null {
+  return directRobotIp;
+}
+
 export const livekitControlChannel: ControlChannel = {
   send(message: ControlMessage): void {
+    // If direct local IP is configured, send HTTP commands with minimal latency
+    if (directRobotIp) {
+      if (message.t === 'drive') {
+        fetch(`http://${directRobotIp}/drive?x=${message.x}&y=${message.y}`).catch(() => {});
+      } else if (message.t === 'stop') {
+        fetch(`http://${directRobotIp}/stop`).catch(() => {});
+      }
+    }
+
     if (!activeRoom || !activeRoom.localParticipant) {
       return;
     }

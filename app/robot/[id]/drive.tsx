@@ -10,6 +10,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
+  Image,
   StyleSheet,
   Pressable,
   PanResponder,
@@ -61,6 +62,7 @@ import {
   sessionService,
   subscribeToRobotVideoTrack,
   setRobotMicrophone,
+  setDirectRobotIp,
 } from '../../../src/services';
 import { showAlert } from '../../../src/features/dialog/dialogStore';
 import { haptics } from '../../../src/utils/haptics';
@@ -118,12 +120,33 @@ export default function DriveScreen() {
   // LiveKit Video Track
   const [videoTrack, setVideoTrack] = useState<any>(null);
 
+  // Direct Wi-Fi Camera Snapshot Stream
+  const [snapshotUri, setSnapshotUri] = useState<string | null>(null);
+
   useEffect(() => {
     const unsubscribe = subscribeToRobotVideoTrack((track) => {
       setVideoTrack(track);
     });
     return unsubscribe;
   }, []);
+
+  // Poll direct camera snapshot from robot local IP if videoTrack is not active
+  useEffect(() => {
+    if (!robot?.localIp || videoTrack) {
+      setSnapshotUri(null);
+      return;
+    }
+    let active = true;
+    const interval = setInterval(() => {
+      if (active) {
+        setSnapshotUri(`http://${robot.localIp}:80/capture?t=${Date.now()}`);
+      }
+    }, 66); // ~15-20 fps
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [robot?.localIp, videoTrack]);
 
   // Sync PTT talk state with robot microphone
   useEffect(() => {
@@ -181,7 +204,12 @@ export default function DriveScreen() {
     async function init() {
       try {
         const r = await robotService.getRobot(id as string);
-        if (mounted) setRobot(r);
+        if (mounted) {
+          setRobot(r);
+          if (r.localIp) {
+            setDirectRobotIp(r.localIp);
+          }
+        }
 
         await liveService.connect(id as string, {
           onConnectionStateChange: (state) => {
@@ -208,6 +236,7 @@ export default function DriveScreen() {
 
     return () => {
       mounted = false;
+      setDirectRobotIp(null);
       liveService.disconnect();
       controlChannel.stopDriving();
     };
@@ -422,13 +451,19 @@ export default function DriveScreen() {
         </View>
       )}
 
-      {/* ── Camera Viewport (LiveKit Video / HUD) ── */}
+      {/* ── Camera Viewport (LiveKit Video / Direct Wi-Fi / HUD) ── */}
       <View style={styles.cameraViewport}>
         {Platform.OS !== 'web' && videoTrack ? (
           <VideoView
             videoTrack={videoTrack}
             style={StyleSheet.absoluteFill}
             objectFit="cover"
+          />
+        ) : snapshotUri ? (
+          <Image
+            source={{ uri: snapshotUri }}
+            style={StyleSheet.absoluteFill}
+            resizeMode="cover"
           />
         ) : (
           <>

@@ -29,6 +29,7 @@ function mapDbRobotToRobot(
     lastSeenAt: dbRobot.last_seen_at || dbRobot.created_at || new Date().toISOString(),
     ownerName: isOwner ? 'You' : ownerName,
     remoteAccessEnabled: dbRobot.remote_access_enabled ?? true,
+    localIp: dbRobot.local_ip ?? null,
     capabilities: dbRobot.capabilities || {
       emotions: ['happy', 'excited', 'love', 'surprised', 'sleepy', 'sad'],
       gestures: ['wave', 'dance'],
