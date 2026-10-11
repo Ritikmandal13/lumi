@@ -424,6 +424,12 @@ void app_main(void) {
     // 3. Connect LiveKit Room & Publish Camera Video
     livekit_room_handle_t room_handle = NULL;
     livekit_room_options_t room_options = {
+        .publish = {
+            .kind = LIVEKIT_MEDIA_TYPE_NONE,
+        },
+        .subscribe = {
+            .kind = LIVEKIT_MEDIA_TYPE_NONE,
+        },
         .on_data_received = on_data_received,
         .on_state_changed = on_room_state_changed,
     };
