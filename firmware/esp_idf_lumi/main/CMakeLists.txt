@@ -10,6 +10,7 @@ idf_component_register(
         esp_timer
         json
         esp32-camera
+        esp_driver_i2c
         driver
         livekit
         mbedtls

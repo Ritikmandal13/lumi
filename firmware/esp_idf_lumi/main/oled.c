@@ -9,7 +9,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "esp_log.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -22,6 +22,10 @@ static bool s_is_paired = false;
 static int s_current_mood = 1;     // Default: Neutral
 static int s_current_look_dir = 0; // Default: Center
 static portMUX_TYPE s_oled_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// Modern ESP-IDF v5 I2C Handles
+static i2c_master_bus_handle_t s_i2c_bus = NULL;
+static i2c_master_dev_handle_t s_oled_dev = NULL;
 
 // Standard 5x7 ASCII font table (ASCII 32-126)
 static const uint8_t font5x7[] = {
@@ -87,19 +91,13 @@ static const uint8_t font5x7[] = {
 };
 
 static esp_err_t ssd1306_write_cmd(uint8_t cmd) {
-    i2c_cmd_handle_t handle = i2c_cmd_link_create();
-    i2c_master_start(handle);
-    i2c_master_write_byte(handle, (OLED_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(handle, 0x00, true); // Control byte: Command
-    i2c_master_write_byte(handle, cmd, true);
-    i2c_master_stop(handle);
-    esp_err_t ret = i2c_master_cmd_begin(OLED_I2C_PORT, handle, pdMS_TO_TICKS(50));
-    i2c_cmd_link_delete(handle);
-    return ret;
+    if (!s_oled_dev) return ESP_FAIL;
+    uint8_t buf[2] = {0x00, cmd};
+    return i2c_master_transmit(s_oled_dev, buf, sizeof(buf), pdMS_TO_TICKS(50));
 }
 
 static esp_err_t ssd1306_render(void) {
-    if (!s_oled_ready) return ESP_FAIL;
+    if (!s_oled_ready || !s_oled_dev) return ESP_FAIL;
 
     // Send full 1024-byte framebuffer in 8 pages (128 bytes each)
     for (uint8_t page = 0; page < 8; page++) {
@@ -107,14 +105,10 @@ static esp_err_t ssd1306_render(void) {
         ssd1306_write_cmd(0x00);        // Set lower column address
         ssd1306_write_cmd(0x10);        // Set higher column address
 
-        i2c_cmd_handle_t handle = i2c_cmd_link_create();
-        i2c_master_start(handle);
-        i2c_master_write_byte(handle, (OLED_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
-        i2c_master_write_byte(handle, 0x40, true); // Control byte: Data
-        i2c_master_write(handle, &s_framebuffer[page * 128], 128, true);
-        i2c_master_stop(handle);
-        i2c_master_cmd_begin(OLED_I2C_PORT, handle, pdMS_TO_TICKS(50));
-        i2c_cmd_link_delete(handle);
+        uint8_t page_buf[129];
+        page_buf[0] = 0x40; // Control byte: Data
+        memcpy(&page_buf[1], &s_framebuffer[page * 128], 128);
+        i2c_master_transmit(s_oled_dev, page_buf, sizeof(page_buf), pdMS_TO_TICKS(50));
     }
     return ESP_OK;
 }
@@ -169,21 +163,32 @@ static void draw_bitmap(int x, int y, const uint8_t *bitmap, int w, int h) {
 }
 
 esp_err_t oled_init(void) {
-    ESP_LOGI(TAG, "Initializing I2C bus (SDA: GPIO %d, SCL: GPIO %d)...", OLED_I2C_SDA_PIN, OLED_I2C_SCL_PIN);
+    ESP_LOGI(TAG, "Initializing I2C master bus (SDA: GPIO %d, SCL: GPIO %d)...", OLED_I2C_SDA_PIN, OLED_I2C_SCL_PIN);
 
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = -1, // Auto-select available I2C port to avoid collision
         .sda_io_num = OLED_I2C_SDA_PIN,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
         .scl_io_num = OLED_I2C_SCL_PIN,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = OLED_I2C_FREQ_HZ,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
     };
-    esp_err_t err = i2c_param_config(OLED_I2C_PORT, &conf);
-    if (err != ESP_OK) return err;
+    esp_err_t err = i2c_new_master_bus(&bus_config, &s_i2c_bus);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
-    err = i2c_driver_install(OLED_I2C_PORT, conf.mode, 0, 0, 0);
-    if (err != ESP_OK) return err;
+    i2c_device_config_t dev_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = OLED_I2C_ADDR,
+        .scl_speed_hz = OLED_I2C_FREQ_HZ,
+    };
+    err = i2c_master_bus_add_device(s_i2c_bus, &dev_config, &s_oled_dev);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "i2c_master_bus_add_device failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
     // SSD1306 Initialization sequence
     const uint8_t init_cmds[] = {
