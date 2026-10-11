@@ -93,7 +93,7 @@ static const uint8_t font5x7[] = {
 static esp_err_t ssd1306_write_cmd(uint8_t cmd) {
     if (!s_oled_dev) return ESP_FAIL;
     uint8_t buf[2] = {0x00, cmd};
-    return i2c_master_transmit(s_oled_dev, buf, sizeof(buf), pdMS_TO_TICKS(50));
+    return i2c_master_transmit(s_oled_dev, buf, sizeof(buf), 100);
 }
 
 static esp_err_t ssd1306_render(void) {
@@ -108,7 +108,10 @@ static esp_err_t ssd1306_render(void) {
         uint8_t page_buf[129];
         page_buf[0] = 0x40; // Control byte: Data
         memcpy(&page_buf[1], &s_framebuffer[page * 128], 128);
-        i2c_master_transmit(s_oled_dev, page_buf, sizeof(page_buf), pdMS_TO_TICKS(50));
+        esp_err_t err = i2c_master_transmit(s_oled_dev, page_buf, sizeof(page_buf), 200);
+        if (err != ESP_OK) {
+            return err;
+        }
     }
     return ESP_OK;
 }
@@ -179,9 +182,35 @@ esp_err_t oled_init(void) {
         return err;
     }
 
+    // Auto-detect OLED I2C Address (0x3C or 0x3D)
+    uint8_t target_addr = 0;
+    if (i2c_master_probe(s_i2c_bus, 0x3C, 50) == ESP_OK) {
+        target_addr = 0x3C;
+        ESP_LOGI(TAG, "Found OLED display at address 0x3C!");
+    } else if (i2c_master_probe(s_i2c_bus, 0x3D, 50) == ESP_OK) {
+        target_addr = 0x3D;
+        ESP_LOGI(TAG, "Found OLED display at address 0x3D!");
+    } else {
+        // Run bus scan to see if any device responds
+        ESP_LOGW(TAG, "OLED not found at 0x3C or 0x3D. Scanning I2C bus (0x01 - 0x7E)...");
+        for (uint8_t a = 1; a < 127; a++) {
+            if (i2c_master_probe(s_i2c_bus, a, 20) == ESP_OK) {
+                ESP_LOGI(TAG, " -> Found I2C device responding at 0x%02X!", a);
+                if (target_addr == 0) target_addr = a;
+            }
+        }
+    }
+
+    if (target_addr == 0) {
+        ESP_LOGE(TAG, "❌ No OLED display detected on SDA (GPIO %d), SCL (GPIO %d)!", OLED_I2C_SDA_PIN, OLED_I2C_SCL_PIN);
+        ESP_LOGE(TAG, "👉 Check physical wiring: OLED VCC->3.3V, GND->GND, SCL->GPIO47, SDA->GPIO21");
+        s_oled_ready = false;
+        return ESP_ERR_NOT_FOUND;
+    }
+
     i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = OLED_I2C_ADDR,
+        .device_address = target_addr,
         .scl_speed_hz = OLED_I2C_FREQ_HZ,
     };
     err = i2c_master_bus_add_device(s_i2c_bus, &dev_config, &s_oled_dev);
@@ -211,12 +240,15 @@ esp_err_t oled_init(void) {
     };
 
     for (size_t i = 0; i < sizeof(init_cmds); i++) {
-        ssd1306_write_cmd(init_cmds[i]);
+        esp_err_t cmd_err = ssd1306_write_cmd(init_cmds[i]);
+        if (cmd_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to send init cmd 0x%02X: %s", init_cmds[i], esp_err_to_name(cmd_err));
+        }
     }
 
     s_oled_ready = true;
     oled_clear();
-    ESP_LOGI(TAG, "SSD1306 OLED Display successfully initialized at 0x%02X!", OLED_I2C_ADDR);
+    ESP_LOGI(TAG, "SSD1306 OLED Display successfully initialized at 0x%02X!", target_addr);
     return ESP_OK;
 }
 
