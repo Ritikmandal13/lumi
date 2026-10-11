@@ -24,7 +24,13 @@ jobs:
         run: |
           . $IDF_PATH/export.sh
           idf.py set-target esp32s3
-          idf.py build
+          idf.py build 2>&1 | tee build.log || {
+            echo "## ❌ Build Failed - Log Output" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -n 60 build.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
           esptool.py --chip esp32s3 merge_bin -o build/lumi_merged.bin --flash_mode dio --flash_size 16MB 0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0x10000 build/lumi_robot.bin
 
       - name: Upload Compiled Binaries
