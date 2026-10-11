@@ -293,8 +293,9 @@ static char* http_post_json(const char *url, const char *json_body) {
 // 6. LIVEKIT DATA CHANNEL HANDLER (JOYSTICK DRIVING)
 // ==============================================================================
 
-static void on_data_received(const uint8_t *data, size_t len, void *user_ctx) {
-    cJSON *json = cJSON_ParseWithLength((const char *)data, len);
+static void on_data_received(const livekit_data_received_t *data, void *ctx) {
+    if (!data || !data->payload.data || data->payload.size == 0) return;
+    cJSON *json = cJSON_ParseWithLength((const char *)data->payload.data, data->payload.size);
     if (!json) return;
 
     cJSON *t = cJSON_GetObjectItem(json, "t");
@@ -411,11 +412,18 @@ void app_main(void) {
     ESP_LOGI(TAG, "Connecting to LiveKit Room at %s...", livekit_url);
 
     // 3. Connect LiveKit Room & Publish Camera Video
-    livekit_room_t *room = livekit_room_create();
-    livekit_room_set_data_callback(room, on_data_received, NULL);
-    livekit_room_connect(room, livekit_url, livekit_token);
+    livekit_room_handle_t room_handle = NULL;
+    livekit_room_options_t room_options = {
+        .on_data_received = on_data_received,
+    };
 
-    ESP_LOGI(TAG, "Robot live! Camera streaming and listening for joystick driving!");
+    livekit_err_t lk_err = livekit_room_create(&room_handle, &room_options);
+    if (lk_err == LIVEKIT_ERR_NONE) {
+        livekit_room_connect(room_handle, livekit_url, livekit_token);
+        ESP_LOGI(TAG, "Robot live! Connected to LiveKit Cloud WebRTC room!");
+    } else {
+        ESP_LOGE(TAG, "Failed to create LiveKit room object, error: %d", lk_err);
+    }
 
     // Heartbeat loop
     char hb_url[128];
