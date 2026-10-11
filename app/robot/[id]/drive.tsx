@@ -1,4 +1,4 @@
-/* eslint-disable react-hooks/immutability, react-hooks/purity, react-hooks/refs */
+/* eslint-disable react-hooks/immutability, react-hooks/purity, react-hooks/refs, react-hooks/set-state-in-effect, react-hooks/preserve-manual-memoization */
 /**
  * S12 Live Control & Driving Screen
  * Real-time video view, virtual joystick with physics & spring release,
@@ -6,7 +6,7 @@
  * Emotions & Gestures drawer, live telemetry HUD, and End Session flow.
  */
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -120,9 +120,6 @@ export default function DriveScreen() {
   // LiveKit Video Track
   const [videoTrack, setVideoTrack] = useState<any>(null);
 
-  // Direct Wi-Fi Camera Snapshot Stream
-  const [snapshotUri, setSnapshotUri] = useState<string | null>(null);
-
   useEffect(() => {
     const unsubscribe = subscribeToRobotVideoTrack((track) => {
       setVideoTrack(track);
@@ -130,23 +127,42 @@ export default function DriveScreen() {
     return unsubscribe;
   }, []);
 
-  // Poll direct camera snapshot from robot local IP if videoTrack is not active
+  // Direct Wi-Fi Camera Snapshot Stream (Smooth sequential polling without request aborts)
+  const [snapshotUri, setSnapshotUri] = useState<string | null>(null);
+  const isFetchingSnapshotRef = useRef(false);
+  const nextSnapshotTimeoutRef = useRef<any>(null);
+
+  const fetchNextSnapshot = useCallback(() => {
+    if (!robot?.localIp || videoTrack) return;
+    setSnapshotUri(`http://${robot.localIp}/capture?t=${Date.now()}`);
+  }, [robot, videoTrack]);
+
+  const handleSnapshotLoaded = useCallback(() => {
+    isFetchingSnapshotRef.current = false;
+    // Schedule next frame 40ms after current frame successfully decodes (~20-25 FPS)
+    if (nextSnapshotTimeoutRef.current) clearTimeout(nextSnapshotTimeoutRef.current);
+    nextSnapshotTimeoutRef.current = setTimeout(fetchNextSnapshot, 40);
+  }, [fetchNextSnapshot]);
+
+  const handleSnapshotError = useCallback(() => {
+    isFetchingSnapshotRef.current = false;
+    // Retry in 300ms if a frame failed or timed out
+    if (nextSnapshotTimeoutRef.current) clearTimeout(nextSnapshotTimeoutRef.current);
+    nextSnapshotTimeoutRef.current = setTimeout(fetchNextSnapshot, 300);
+  }, [fetchNextSnapshot]);
+
+  // Initial trigger for snapshot stream
   useEffect(() => {
     if (!robot?.localIp || videoTrack) {
       setSnapshotUri(null);
+      if (nextSnapshotTimeoutRef.current) clearTimeout(nextSnapshotTimeoutRef.current);
       return;
     }
-    let active = true;
-    const interval = setInterval(() => {
-      if (active) {
-        setSnapshotUri(`http://${robot.localIp}:80/capture?t=${Date.now()}`);
-      }
-    }, 66); // ~15-20 fps
+    fetchNextSnapshot();
     return () => {
-      active = false;
-      clearInterval(interval);
+      if (nextSnapshotTimeoutRef.current) clearTimeout(nextSnapshotTimeoutRef.current);
     };
-  }, [robot?.localIp, videoTrack]);
+  }, [robot?.localIp, videoTrack, fetchNextSnapshot]);
 
   // Sync PTT talk state with robot microphone
   useEffect(() => {
@@ -208,25 +224,40 @@ export default function DriveScreen() {
           setRobot(r);
           if (r.localIp) {
             setDirectRobotIp(r.localIp);
+            setConnectionState('connected'); // Immediately ready for Direct Wi-Fi stream & controls
           }
         }
 
-        await liveService.connect(id as string, {
-          onConnectionStateChange: (state) => {
-            if (mounted) setConnectionState(state);
-          },
-          onTelemetry: (telem) => {
-            if (mounted) {
-              setTelemetry(telem);
-              if (telem.currentEmotion) {
-                setActiveEmotion(telem.currentEmotion as Emotion);
+        try {
+          await liveService.connect(id as string, {
+            onConnectionStateChange: (state) => {
+              if (mounted) {
+                // If robot is directly connected via Wi-Fi, stay connected
+                if (!r.localIp || state === 'connected') {
+                  setConnectionState(state);
+                }
               }
-            }
-          },
-          onError: (err) => {
-            showAlert('Connection Error', err, undefined, 'warning');
-          },
-        });
+            },
+            onTelemetry: (telem) => {
+              if (mounted) {
+                setTelemetry(telem);
+                if (telem.currentEmotion) {
+                  setActiveEmotion(telem.currentEmotion as Emotion);
+                }
+              }
+            },
+            onError: (err) => {
+              // Only alert if we don't have direct local Wi-Fi fallback
+              if (!r.localIp) {
+                showAlert('Connection Error', err, undefined, 'warning');
+              }
+            },
+          });
+        } catch (liveErr) {
+          if (!r.localIp) {
+            showAlert('Connection Failed', (liveErr as any)?.message || 'Failed to connect to LUMI', undefined, 'danger');
+          }
+        }
       } catch (err: any) {
         showAlert('Connection Failed', err.message || 'Failed to connect to LUMI', undefined, 'danger');
       }
@@ -453,7 +484,22 @@ export default function DriveScreen() {
 
       {/* ── Camera Viewport (LiveKit Video / Direct Wi-Fi / HUD) ── */}
       <View style={styles.cameraViewport}>
-        {Platform.OS !== 'web' && videoTrack ? (
+        {Platform.OS === 'web' && robot?.localIp ? (
+          // Web: Native MJPEG stream at full 30 FPS!
+          // @ts-ignore
+          <img
+            src={`http://${robot.localIp}:81/stream`}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+            }}
+            alt="LUMI Live Camera Stream"
+          />
+        ) : Platform.OS !== 'web' && videoTrack ? (
           <VideoView
             videoTrack={videoTrack}
             style={StyleSheet.absoluteFill}
@@ -464,6 +510,8 @@ export default function DriveScreen() {
             source={{ uri: snapshotUri }}
             style={StyleSheet.absoluteFill}
             resizeMode="cover"
+            onLoad={handleSnapshotLoaded}
+            onError={handleSnapshotError}
           />
         ) : (
           <>
@@ -480,15 +528,17 @@ export default function DriveScreen() {
         <View style={styles.viewportOverlayBottom}>
           <View style={styles.videoQualityTag}>
             <Video size={12} color="#94A3B8" />
-            <Text style={styles.videoQualityText}>720p 30fps</Text>
+            <Text style={styles.videoQualityText}>
+              {robot?.localIp ? 'Direct Wi-Fi' : '720p 30fps'}
+            </Text>
           </View>
           <Text style={styles.timestampOverlay}>
             {new Date().toLocaleTimeString()}
           </Text>
         </View>
 
-        {/* Connecting overlay */}
-        {connectionState === 'connecting' && (
+        {/* Connecting overlay (only when no direct IP and connecting to cloud) */}
+        {connectionState === 'connecting' && !robot?.localIp && (
           <View style={styles.connectingOverlay}>
             <RobotFace size={60} color={faceColor} emotion="curious" />
             <Text style={styles.connectingText}>
