@@ -28,6 +28,7 @@
 
 // LiveKit SDK
 #include "livekit.h"
+#include "oled.h"
 
 static const char *TAG = "LUMI_ROBOT";
 
@@ -311,8 +312,9 @@ static void on_data_received(const uint8_t *data, size_t len, void *user_ctx) {
             ESP_LOGW(TAG, "EMERGENCY STOP EXECUTED");
         } else if (strcmp(t->valuestring, "emotion") == 0) {
             cJSON *name = cJSON_GetObjectItem(json, "name");
-            if (name) {
+            if (name && name->valuestring) {
                 ESP_LOGI(TAG, "Emote Triggered: %s", name->valuestring);
+                oled_set_emotion_by_name(name->valuestring);
             }
         }
     }
@@ -325,6 +327,11 @@ static void on_data_received(const uint8_t *data, size_t len, void *user_ctx) {
 
 void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
+
+    // Initialize OLED Screen & start eye animations
+    oled_init();
+    oled_start_animation_task();
+    oled_show_pairing_screen("------");
 
     init_camera();
     init_motors();
@@ -356,9 +363,11 @@ void app_main(void) {
                     ESP_LOGW(TAG, "🎉 LUMI PAIRING CODE: [%s]", code->valuestring);
                     ESP_LOGW(TAG, "👉 Enter this 6-digit code in the LUMI Mobile App!");
                     ESP_LOGW(TAG, "================================================");
+                    oled_show_pairing_screen(code->valuestring);
                 } else if (status && strcmp(status->valuestring, "paired") == 0) {
                     ESP_LOGI(TAG, "🎉 Robot paired to account! Fetching LiveKit token...");
                     paired = true;
+                    oled_set_paired(true);
                 }
                 cJSON_Delete(root);
             }
