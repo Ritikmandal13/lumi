@@ -22,6 +22,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "cJSON.h"
 #include "esp_camera.h"
 #include "driver/ledc.h"
@@ -294,8 +295,8 @@ static char* http_post_json(const char *url, const char *json_body) {
 // ==============================================================================
 
 static void on_data_received(const livekit_data_received_t *data, void *ctx) {
-    if (!data || !data->payload.data || data->payload.size == 0) return;
-    cJSON *json = cJSON_ParseWithLength((const char *)data->payload.data, data->payload.size);
+    if (!data || !data->payload.bytes || data->payload.size == 0) return;
+    cJSON *json = cJSON_ParseWithLength((const char *)data->payload.bytes, data->payload.size);
     if (!json) return;
 
     cJSON *t = cJSON_GetObjectItem(json, "t");
@@ -320,6 +321,10 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
         }
     }
     cJSON_Delete(json);
+}
+
+static void on_room_state_changed(livekit_connection_state_t state, void *ctx) {
+    ESP_LOGI(TAG, "LiveKit Room state changed: %s", livekit_connection_state_str(state));
 }
 
 // ==============================================================================
@@ -415,6 +420,7 @@ void app_main(void) {
     livekit_room_handle_t room_handle = NULL;
     livekit_room_options_t room_options = {
         .on_data_received = on_data_received,
+        .on_state_changed = on_room_state_changed,
     };
 
     livekit_err_t lk_err = livekit_room_create(&room_handle, &room_options);

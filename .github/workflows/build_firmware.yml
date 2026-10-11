@@ -23,12 +23,38 @@ jobs:
         working-directory: firmware/esp_idf_lumi
         run: |
           . $IDF_PATH/export.sh
+          # Pre-resolve components and target
           idf.py set-target esp32s3 || true
+          # Sanitize malformed sdkconfig.rename files in managed components to eliminate kconfgen syntax errors
           find managed_components -name "sdkconfig.rename" -exec truncate -s 0 {} + 2>/dev/null || true
-          idf.py build
-          esptool.py --chip esp32s3 merge_bin -o build/lumi_merged.bin --flash_mode dio --flash_size 16MB 0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0x10000 build/lumi_robot.bin
+
+          # Build project and capture log
+          idf.py build 2>&1 | tee build.log || {
+            echo "## ❌ ESP-IDF Build Failed" >> $GITHUB_STEP_SUMMARY
+            echo '```text' >> $GITHUB_STEP_SUMMARY
+            tail -n 80 build.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
+
+          # Merge binaries into a single 1-click flasher binary at 0x0
+          esptool.py --chip esp32s3 merge_bin -o build/lumi_merged.bin --flash_mode dio --flash_size 16MB 0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0x10000 build/lumi_robot.bin 2>&1 | tee -a build.log || {
+            echo "## ❌ Binary Merging Failed" >> $GITHUB_STEP_SUMMARY
+            echo '```text' >> $GITHUB_STEP_SUMMARY
+            tail -n 50 build.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
+
+      - name: Upload Build Log on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: idf-build-log
+          path: firmware/esp_idf_lumi/build.log
 
       - name: Upload Compiled Binaries
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: lumi-esp32s3-binaries
@@ -37,3 +63,12 @@ jobs:
             firmware/esp_idf_lumi/build/bootloader/bootloader.bin
             firmware/esp_idf_lumi/build/partition_table/partition-table.bin
             firmware/esp_idf_lumi/build/lumi_robot.bin
+
+      - name: Log Build Success
+        if: success()
+        run: |
+          echo "## 🎉 ESP32-S3 Firmware Compiled Successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target:** ESP32-S3 (16MB Flash, 8MB Octal PSRAM)" >> $GITHUB_STEP_SUMMARY
+          echo "- **App Partition:** 8MB (LiveKit WebRTC + Video Codec + Camera + OLED)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifacts:** \`lumi_merged.bin\` (1-click web flasher at 0x0) and individual binaries" >> $GITHUB_STEP_SUMMARY
+

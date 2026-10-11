@@ -12,6 +12,7 @@ idf_component_register(
         esp32-camera
         driver
         livekit
+        mbedtls
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-deprecated-declarations -Wno-unused-variable)
