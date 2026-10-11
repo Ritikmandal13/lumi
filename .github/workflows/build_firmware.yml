@@ -25,12 +25,14 @@ jobs:
           . $IDF_PATH/export.sh
           idf.py set-target esp32s3
           idf.py build
+          esptool.py --chip esp32s3 merge_bin -o build/lumi_merged.bin --flash_mode dio --flash_size 16MB 0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0x10000 build/lumi_robot.bin
 
       - name: Upload Compiled Binaries
         uses: actions/upload-artifact@v4
         with:
           name: lumi-esp32s3-binaries
           path: |
+            firmware/esp_idf_lumi/build/lumi_merged.bin
             firmware/esp_idf_lumi/build/bootloader/bootloader.bin
             firmware/esp_idf_lumi/build/partition_table/partition-table.bin
             firmware/esp_idf_lumi/build/lumi_robot.bin
