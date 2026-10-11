@@ -184,14 +184,15 @@ static esp_err_t init_camera(void) {
         .pin_vsync = CAM_PIN_VSYNC,
         .pin_href = CAM_PIN_HREF,
         .pin_pclk = CAM_PIN_PCLK,
-        .xclk_freq_hz = 20000000,
-        .ledc_timer = LEDC_TIMER_1,
-        .ledc_channel = LEDC_CHANNEL_4,
+        .xclk_freq_hz = 10000000,
+        .ledc_timer = LEDC_TIMER_3,
+        .ledc_channel = LEDC_CHANNEL_7,
         .pixel_format = PIXFORMAT_JPEG,
         .frame_size = FRAMESIZE_VGA, // 640x480
         .jpeg_quality = 12,
         .fb_count = 2,
-        .grab_mode = CAMERA_GRAB_LATEST
+        .grab_mode = CAMERA_GRAB_LATEST,
+        .fb_location = CAMERA_FB_IN_PSRAM
     };
 
     esp_err_t err = esp_camera_init(&config);
@@ -325,8 +326,8 @@ static void on_data_received(const uint8_t *data, size_t len, void *user_ctx) {
 void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
 
-    init_motors();
     init_camera();
+    init_motors();
     init_wifi();
 
     ESP_LOGI(TAG, "Waiting for Wi-Fi connection...");

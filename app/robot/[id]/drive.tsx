@@ -1,4 +1,4 @@
-/* eslint-disable react-hooks/immutability, react-hooks/purity, react-hooks/refs, react-hooks/set-state-in-effect, react-hooks/preserve-manual-memoization */
+/* eslint-disable react-hooks/immutability, react-hooks/purity, react-hooks/refs */
 /**
  * S12 Live Control & Driving Screen
  * Real-time video view, virtual joystick with physics & spring release,
@@ -6,11 +6,10 @@
  * Emotions & Gestures drawer, live telemetry HUD, and End Session flow.
  */
 
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
-  Image,
   StyleSheet,
   Pressable,
   PanResponder,
@@ -62,7 +61,6 @@ import {
   sessionService,
   subscribeToRobotVideoTrack,
   setRobotMicrophone,
-  setDirectRobotIp,
 } from '../../../src/services';
 import { showAlert } from '../../../src/features/dialog/dialogStore';
 import { haptics } from '../../../src/utils/haptics';
@@ -117,7 +115,7 @@ export default function DriveScreen() {
   const [isTalking, setIsTalking] = useState(false);
   const [isMicLocked, setIsMicLocked] = useState(false);
 
-  // LiveKit Video Track
+  // LiveKit Remote Video Track
   const [videoTrack, setVideoTrack] = useState<any>(null);
 
   useEffect(() => {
@@ -126,43 +124,6 @@ export default function DriveScreen() {
     });
     return unsubscribe;
   }, []);
-
-  // Direct Wi-Fi Camera Snapshot Stream (Smooth sequential polling without request aborts)
-  const [snapshotUri, setSnapshotUri] = useState<string | null>(null);
-  const isFetchingSnapshotRef = useRef(false);
-  const nextSnapshotTimeoutRef = useRef<any>(null);
-
-  const fetchNextSnapshot = useCallback(() => {
-    if (!robot?.localIp || videoTrack) return;
-    setSnapshotUri(`http://${robot.localIp}/capture?t=${Date.now()}`);
-  }, [robot, videoTrack]);
-
-  const handleSnapshotLoaded = useCallback(() => {
-    isFetchingSnapshotRef.current = false;
-    // Schedule next frame 40ms after current frame successfully decodes (~20-25 FPS)
-    if (nextSnapshotTimeoutRef.current) clearTimeout(nextSnapshotTimeoutRef.current);
-    nextSnapshotTimeoutRef.current = setTimeout(fetchNextSnapshot, 40);
-  }, [fetchNextSnapshot]);
-
-  const handleSnapshotError = useCallback(() => {
-    isFetchingSnapshotRef.current = false;
-    // Retry in 300ms if a frame failed or timed out
-    if (nextSnapshotTimeoutRef.current) clearTimeout(nextSnapshotTimeoutRef.current);
-    nextSnapshotTimeoutRef.current = setTimeout(fetchNextSnapshot, 300);
-  }, [fetchNextSnapshot]);
-
-  // Initial trigger for snapshot stream
-  useEffect(() => {
-    if (!robot?.localIp || videoTrack) {
-      setSnapshotUri(null);
-      if (nextSnapshotTimeoutRef.current) clearTimeout(nextSnapshotTimeoutRef.current);
-      return;
-    }
-    fetchNextSnapshot();
-    return () => {
-      if (nextSnapshotTimeoutRef.current) clearTimeout(nextSnapshotTimeoutRef.current);
-    };
-  }, [robot?.localIp, videoTrack, fetchNextSnapshot]);
 
   // Sync PTT talk state with robot microphone
   useEffect(() => {
@@ -213,7 +174,7 @@ export default function DriveScreen() {
     return () => clearInterval(timer);
   }, [sessionStartTime]);
 
-  // Load robot & connect to live stream
+  // Load robot & connect to LiveKit WebRTC Cloud stream
   useEffect(() => {
     let mounted = true;
 
@@ -222,44 +183,28 @@ export default function DriveScreen() {
         const r = await robotService.getRobot(id as string);
         if (mounted) {
           setRobot(r);
-          if (r.localIp) {
-            setDirectRobotIp(r.localIp);
-            setConnectionState('connected'); // Immediately ready for Direct Wi-Fi stream & controls
-          }
         }
 
-        try {
-          await liveService.connect(id as string, {
-            onConnectionStateChange: (state) => {
-              if (mounted) {
-                // If robot is directly connected via Wi-Fi, stay connected
-                if (!r.localIp || state === 'connected') {
-                  setConnectionState(state);
-                }
+        await liveService.connect(id as string, {
+          onConnectionStateChange: (state) => {
+            if (mounted) {
+              setConnectionState(state);
+            }
+          },
+          onTelemetry: (telem) => {
+            if (mounted) {
+              setTelemetry(telem);
+              if (telem.currentEmotion) {
+                setActiveEmotion(telem.currentEmotion as Emotion);
               }
-            },
-            onTelemetry: (telem) => {
-              if (mounted) {
-                setTelemetry(telem);
-                if (telem.currentEmotion) {
-                  setActiveEmotion(telem.currentEmotion as Emotion);
-                }
-              }
-            },
-            onError: (err) => {
-              // Only alert if we don't have direct local Wi-Fi fallback
-              if (!r.localIp) {
-                showAlert('Connection Error', err, undefined, 'warning');
-              }
-            },
-          });
-        } catch (liveErr) {
-          if (!r.localIp) {
-            showAlert('Connection Failed', (liveErr as any)?.message || 'Failed to connect to LUMI', undefined, 'danger');
-          }
-        }
+            }
+          },
+          onError: (err) => {
+            showAlert('Cloud Connection Error', err, undefined, 'warning');
+          },
+        });
       } catch (err: any) {
-        showAlert('Connection Failed', err.message || 'Failed to connect to LUMI', undefined, 'danger');
+        showAlert('Connection Failed', err.message || 'Failed to connect to LUMI Cloud', undefined, 'danger');
       }
     }
 
@@ -267,7 +212,6 @@ export default function DriveScreen() {
 
     return () => {
       mounted = false;
-      setDirectRobotIp(null);
       liveService.disconnect();
       controlChannel.stopDriving();
     };
@@ -482,36 +426,13 @@ export default function DriveScreen() {
         </View>
       )}
 
-      {/* ── Camera Viewport (LiveKit Video / Direct Wi-Fi / HUD) ── */}
+      {/* ── Camera Viewport (LiveKit Remote Cloud WebRTC) ── */}
       <View style={styles.cameraViewport}>
-        {Platform.OS === 'web' && robot?.localIp ? (
-          // Web: Native MJPEG stream at full 30 FPS!
-          // @ts-ignore
-          <img
-            src={`http://${robot.localIp}:81/stream`}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-            }}
-            alt="LUMI Live Camera Stream"
-          />
-        ) : Platform.OS !== 'web' && videoTrack ? (
+        {videoTrack ? (
           <VideoView
             videoTrack={videoTrack}
             style={StyleSheet.absoluteFill}
             objectFit="cover"
-          />
-        ) : snapshotUri ? (
-          <Image
-            source={{ uri: snapshotUri }}
-            style={StyleSheet.absoluteFill}
-            resizeMode="cover"
-            onLoad={handleSnapshotLoaded}
-            onError={handleSnapshotError}
           />
         ) : (
           <>
@@ -528,21 +449,19 @@ export default function DriveScreen() {
         <View style={styles.viewportOverlayBottom}>
           <View style={styles.videoQualityTag}>
             <Video size={12} color="#94A3B8" />
-            <Text style={styles.videoQualityText}>
-              {robot?.localIp ? 'Direct Wi-Fi' : '720p 30fps'}
-            </Text>
+            <Text style={styles.videoQualityText}>LiveKit Cloud WebRTC</Text>
           </View>
           <Text style={styles.timestampOverlay}>
             {new Date().toLocaleTimeString()}
           </Text>
         </View>
 
-        {/* Connecting overlay (only when no direct IP and connecting to cloud) */}
-        {connectionState === 'connecting' && !robot?.localIp && (
+        {/* Connecting overlay */}
+        {connectionState === 'connecting' && (
           <View style={styles.connectingOverlay}>
             <RobotFace size={60} color={faceColor} emotion="curious" />
             <Text style={styles.connectingText}>
-              {t('live.findingLumi', 'Connecting to LUMI…')}
+              {t('live.findingLumi', 'Connecting to LUMI Cloud…')}
             </Text>
           </View>
         )}
