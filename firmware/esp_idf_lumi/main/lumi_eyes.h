@@ -951,7 +951,7 @@ static const unsigned char  eye16i[] =
 
 
 // [mood][pos][l/r]
-const unsigned char *peyes[][3][2]={
+static const unsigned char *peyes[][3][2]={
  { {   eye4,   eye4},{   eye5,   eye5},{   eye6,   eye6} },
  { {   eye1,   eye1},{   eye2,   eye2},{   eye3,   eye3} },
  { {   eye0,   eye0},{   eye0,   eye0},{   eye0,   eye0} },

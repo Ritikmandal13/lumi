@@ -292,7 +292,7 @@ void oled_set_emotion_by_name(const char *name) {
     else if (strcmp(name, "love") == 0)    s_current_mood = 6;
 
     if (s_is_paired) {
-        oled_draw_eyes(s_current_mood, s_current_lookDir);
+        oled_draw_eyes(s_current_mood, s_current_look_dir);
     }
 }
 

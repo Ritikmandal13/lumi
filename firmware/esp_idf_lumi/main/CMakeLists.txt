@@ -13,3 +13,6 @@ idf_component_register(
         driver
         livekit
 )
+
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-deprecated-declarations -Wno-unused-variable)
+

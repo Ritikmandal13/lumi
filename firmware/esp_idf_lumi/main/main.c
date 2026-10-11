@@ -328,6 +328,9 @@ static void on_data_received(const uint8_t *data, size_t len, void *user_ctx) {
 void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
 
+    // Initialize LiveKit SDK
+    livekit_system_init();
+
     // Initialize OLED Screen & start eye animations
     oled_init();
     oled_start_animation_task();
