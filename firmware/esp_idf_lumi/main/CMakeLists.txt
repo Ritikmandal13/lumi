@@ -7,6 +7,7 @@ idf_component_register(
         esp_event
         esp_netif
         esp_http_client
+        esp_http_server
         esp_timer
         json
         esp32-camera

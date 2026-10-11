@@ -10,6 +10,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
+  Image,
   StyleSheet,
   Pressable,
   PanResponder,
@@ -118,12 +119,26 @@ export default function DriveScreen() {
   // LiveKit Remote Video Track
   const [videoTrack, setVideoTrack] = useState<any>(null);
 
+  // Local camera stream from robot
+  const [cameraStreamUrl, setCameraStreamUrl] = useState<string | null>(null);
+  const [snapshotKey, setSnapshotKey] = useState(Date.now());
+
   useEffect(() => {
     const unsubscribe = subscribeToRobotVideoTrack((track) => {
       setVideoTrack(track);
     });
     return unsubscribe;
   }, []);
+
+  // Poll camera snapshot when on local stream and no WebRTC video track
+  useEffect(() => {
+    if (!videoTrack && cameraStreamUrl) {
+      const timer = setInterval(() => {
+        setSnapshotKey(Date.now());
+      }, 100);
+      return () => clearInterval(timer);
+    }
+  }, [videoTrack, cameraStreamUrl]);
 
   // Sync PTT talk state with robot microphone
   useEffect(() => {
@@ -183,6 +198,9 @@ export default function DriveScreen() {
         const r = await robotService.getRobot(id as string);
         if (mounted) {
           setRobot(r);
+          if ((r as any)?.ip) {
+            setCameraStreamUrl(`http://${(r as any).ip}:81`);
+          }
         }
 
         await liveService.connect(id as string, {
@@ -196,6 +214,9 @@ export default function DriveScreen() {
               setTelemetry(telem);
               if (telem.currentEmotion) {
                 setActiveEmotion(telem.currentEmotion as Emotion);
+              }
+              if ((telem as any)?.ip) {
+                setCameraStreamUrl(`http://${(telem as any).ip}:81`);
               }
             }
           },
@@ -434,6 +455,13 @@ export default function DriveScreen() {
             style={StyleSheet.absoluteFill}
             objectFit="cover"
           />
+        ) : cameraStreamUrl ? (
+          <Image
+            key={snapshotKey}
+            source={{ uri: `${cameraStreamUrl}/capture?t=${snapshotKey}` }}
+            style={StyleSheet.absoluteFill}
+            resizeMode="cover"
+          />
         ) : (
           <>
             {/* Room grid simulation */}
@@ -449,7 +477,13 @@ export default function DriveScreen() {
         <View style={styles.viewportOverlayBottom}>
           <View style={styles.videoQualityTag}>
             <Video size={12} color="#94A3B8" />
-            <Text style={styles.videoQualityText}>LiveKit Cloud WebRTC</Text>
+            <Text style={styles.videoQualityText}>
+              {videoTrack
+                ? 'LiveKit Cloud WebRTC'
+                : cameraStreamUrl
+                ? `OV3660 HD Stream (${cameraStreamUrl}/stream)`
+                : 'LUMI Robot Video'}
+            </Text>
           </View>
           <Text style={styles.timestampOverlay}>
             {new Date().toLocaleTimeString()}

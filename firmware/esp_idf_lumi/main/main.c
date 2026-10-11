@@ -22,6 +22,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_http_client.h"
+#include "esp_http_server.h"
 #include "esp_crt_bundle.h"
 #include "cJSON.h"
 #include "esp_camera.h"
@@ -213,11 +214,99 @@ static esp_err_t init_camera(void) {
 }
 
 // ==============================================================================
+// 4B. CAMERA HTTP STREAM SERVER (MJPEG on port 81)
+// ==============================================================================
+
+#define PART_BOUNDARY "123456789000000000000987654321"
+static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
+static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
+static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+static esp_err_t jpg_stream_httpd_handler(httpd_req_t *req) {
+    camera_fb_t *fb = NULL;
+    esp_err_t res = ESP_OK;
+    char part_buf[128];
+
+    res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
+    if (res != ESP_OK) return res;
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    while (true) {
+        fb = esp_camera_fb_get();
+        if (!fb) {
+            ESP_LOGE(TAG, "Camera capture failed");
+            res = ESP_FAIL;
+            break;
+        }
+
+        if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
+        }
+        if (res == ESP_OK) {
+            size_t hlen = snprintf(part_buf, sizeof(part_buf), _STREAM_PART, (unsigned int)fb->len);
+            res = httpd_resp_send_chunk(req, part_buf, hlen);
+        }
+        if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+        }
+        esp_camera_fb_return(fb);
+        fb = NULL;
+        if (res != ESP_OK) break;
+        vTaskDelay(pdMS_TO_TICKS(40)); // ~25 FPS
+    }
+    return res;
+}
+
+static esp_err_t jpg_snapshot_httpd_handler(httpd_req_t *req) {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+    esp_camera_fb_return(fb);
+    return res;
+}
+
+static httpd_handle_t start_camera_server(void) {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 81;
+    config.ctrl_port = 32769;
+    config.max_open_sockets = 4;
+    config.stack_size = 8192;
+
+    httpd_handle_t stream_httpd = NULL;
+    if (httpd_start(&stream_httpd, &config) == ESP_OK) {
+        httpd_uri_t stream_uri = {
+            .uri = "/stream",
+            .method = HTTP_GET,
+            .handler = jpg_stream_httpd_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(stream_httpd, &stream_uri);
+
+        httpd_uri_t snap_uri = {
+            .uri = "/capture",
+            .method = HTTP_GET,
+            .handler = jpg_snapshot_httpd_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(stream_httpd, &snap_uri);
+        ESP_LOGI(TAG, "🎥 Camera MJPEG HTTP stream server started on port 81");
+    }
+    return stream_httpd;
+}
+
+// ==============================================================================
 // 5. WI-FI & SUPABASE HTTP HELPER
 // ==============================================================================
 
 static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
+static char s_robot_ip[32] = "127.0.0.1";
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
@@ -227,8 +316,10 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         esp_wifi_connect();
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        snprintf(s_robot_ip, sizeof(s_robot_ip), IPSTR, IP2STR(&event->ip_info.ip));
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        ESP_LOGI(TAG, "Connected to Wi-Fi!");
+        ESP_LOGI(TAG, "Connected to Wi-Fi! Robot IP: %s", s_robot_ip);
     }
 }
 
@@ -354,6 +445,13 @@ void app_main(void) {
     ESP_LOGI(TAG, "Waiting for Wi-Fi connection...");
     xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
 
+    // Start local camera stream server immediately so user can view live video anytime
+    start_camera_server();
+    ESP_LOGI(TAG, "================================================");
+    ESP_LOGI(TAG, "🎥 Camera Live Stream: http://%s:81/stream", s_robot_ip);
+    ESP_LOGI(TAG, "📸 Camera Snapshot:    http://%s:81/capture", s_robot_ip);
+    ESP_LOGI(TAG, "================================================");
+
     // 1. Supabase Pairing Handshake
     char req_body[256];
     snprintf(req_body, sizeof(req_body), 
@@ -445,14 +543,32 @@ void app_main(void) {
     // Heartbeat loop
     char hb_url[128];
     snprintf(hb_url, sizeof(hb_url), "%s/functions/v1/robot-heartbeat", SUPABASE_BASE_URL);
-    char hb_body[256];
+    char hb_body[320];
     snprintf(hb_body, sizeof(hb_body), 
-             "{\"lumi_id\":\"%s\",\"device_secret\":\"%s\",\"battery_percent\":90,\"wifi_signal\":4}", 
-             LUMI_ID, DEVICE_SECRET);
+             "{\"lumi_id\":\"%s\",\"device_secret\":\"%s\",\"battery_percent\":90,\"wifi_signal\":4,\"ip\":\"%s\"}", 
+             LUMI_ID, DEVICE_SECRET, s_robot_ip);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
         char *hb_res = http_post_json(hb_url, hb_body);
         if (hb_res) free(hb_res);
+
+        // Also publish real-time telemetry over WebRTC Data Channel if connected
+        if (room_handle != NULL) {
+            char telem_json[256];
+            snprintf(telem_json, sizeof(telem_json),
+                     "{\"t\":\"telemetry\",\"batteryPercent\":90,\"wifiSignal\":4,\"latencyMs\":40,\"currentEmotion\":\"happy\",\"ip\":\"%s\"}",
+                     s_robot_ip);
+            livekit_data_payload_t payload = {
+                .bytes = (uint8_t*)telem_json,
+                .size = strlen(telem_json)
+            };
+            livekit_data_publish_options_t pub_opts = {
+                .payload = &payload,
+                .topic = "telemetry",
+                .lossy = true
+            };
+            livekit_room_publish_data(room_handle, &pub_opts);
+        }
     }
 }

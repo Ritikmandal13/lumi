@@ -36,6 +36,34 @@ jobs:
           rm -f sdkconfig
           idf.py reconfigure
 
+          # Patch LiveKit SDK engine.c to allow NULL capturer when publishing is data-only
+          python3 -c "
+import glob, re
+
+for path in glob.glob('managed_components/**/engine.c', recursive=True):
+    with open(path, 'r') as f:
+        c = f.read()
+    c = re.sub(
+        r'(static\s+engine_err_t\s+enable_capture_sink\s*\(\s*engine_t\s*\*eng\s*\)\s*\{)',
+        r'\1\n    if (eng->options.media.capturer == NULL) return ENGINE_ERR_NONE;',
+        c
+    )
+    c = re.sub(
+        r'(static\s+engine_err_t\s+media_stream_begin\s*\(\s*engine_t\s*\*eng\s*\)\s*\{)',
+        r'\1\n    if (eng->options.media.capturer == NULL) return ENGINE_ERR_NONE;',
+        c
+    )
+    c = re.sub(
+        r'(static\s+engine_err_t\s+media_stream_end\s*\(\s*engine_t\s*\*eng\s*\)\s*\{)',
+        r'\1\n    if (eng->options.media.capturer == NULL) return ENGINE_ERR_NONE;',
+        c
+    )
+    with open(path, 'w') as f:
+        f.write(c)
+    print(f'✅ Successfully patched {path}')
+"
+          find managed_components -name "engine.c" -exec grep -H "if (eng->options.media.capturer == NULL)" {} + || true
+
           # Build project and capture log
           idf.py build 2>&1 | tee build.log
 
