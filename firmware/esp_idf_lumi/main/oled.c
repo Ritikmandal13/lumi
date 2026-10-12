@@ -317,16 +317,36 @@ void oled_draw_blink(void) {
     ssd1306_render();
 }
 
+void oled_draw_wink(void) {
+    if (!s_oled_ready) return;
+
+    taskENTER_CRITICAL(&s_oled_mux);
+    memset(s_framebuffer, 0, sizeof(s_framebuffer));
+    draw_bitmap(18, 16, eye0, 32, 32);            // Left eye closed winking
+    draw_bitmap(78, 16, peyes[0][0][1], 32, 32);   // Right eye open happy
+    taskEXIT_CRITICAL(&s_oled_mux);
+
+    ssd1306_render();
+}
+
 void oled_set_emotion_by_name(const char *name) {
     if (!name) return;
-    if (strcmp(name, "happy") == 0)      s_current_mood = 0;
-    else if (strcmp(name, "neutral") == 0) s_current_mood = 1;
+    if (strcmp(name, "happy") == 0)        s_current_mood = 0;
+    else if (strcmp(name, "excited") == 0) s_current_mood = 0;
     else if (strcmp(name, "curious") == 0) s_current_mood = 1;
+    else if (strcmp(name, "neutral") == 0) s_current_mood = 1;
     else if (strcmp(name, "sleep") == 0)   s_current_mood = 2;
+    else if (strcmp(name, "sleepy") == 0)  s_current_mood = 2;
     else if (strcmp(name, "angry") == 0)   s_current_mood = 3;
     else if (strcmp(name, "upset") == 0)   s_current_mood = 4;
     else if (strcmp(name, "sad") == 0)     s_current_mood = 5;
     else if (strcmp(name, "love") == 0)    s_current_mood = 6;
+    else if (strcmp(name, "wink") == 0) {
+        if (s_is_paired) {
+            oled_draw_wink();
+            return;
+        }
+    }
 
     if (s_is_paired) {
         oled_draw_eyes(s_current_mood, s_current_look_dir);

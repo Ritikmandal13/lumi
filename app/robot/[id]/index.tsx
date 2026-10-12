@@ -4,7 +4,7 @@
  * hardware telemetry, member preview, and big Connect & Drive CTA.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -34,7 +34,7 @@ import {
 } from 'lucide-react-native';
 import { useTheme } from '../../../src/theme';
 import { typography, spacing, radius, robotColors } from '../../../src/theme/tokens';
-import { robotService, controlChannel, sessionService } from '../../../src/services';
+import { robotService, controlChannel, sessionService, liveService } from '../../../src/services';
 import { RobotFace, type Emotion } from '../../../src/components/RobotFace';
 import { StatusPill } from '../../../src/components/StatusPill';
 import { Button } from '../../../src/components/Button';
@@ -97,10 +97,33 @@ export default function RobotDetailScreen() {
     setTimeout(() => setLastEmoteFeedback(null), 2000);
   };
 
+  // Connect to LiveKit room so Quick Emotions work directly from the overview dashboard
+  useEffect(() => {
+    let active = true;
+    if (id && isOnline) {
+      liveService
+        .connect(id as string, {
+          onConnectionStateChange: () => {},
+          onTelemetry: (telem) => {
+            if (active && telem.currentEmotion) {
+              setCurrentEmotion(telem.currentEmotion as Emotion);
+            }
+          },
+          onError: () => {},
+        })
+        .catch(() => {});
+    }
+    return () => {
+      active = false;
+    };
+  }, [id, isOnline]);
+
   const cycleFaceEmotion = () => {
     const list: Emotion[] = ['happy', 'curious', 'wink', 'surprised', 'excited', 'love'];
     const nextIdx = (list.indexOf(currentEmotion) + 1) % list.length;
-    setCurrentEmotion(list[nextIdx]);
+    const nextEmotion = list[nextIdx];
+    setCurrentEmotion(nextEmotion);
+    controlChannel.sendEmotion(nextEmotion);
   };
 
   if (isLoading || !robot) {

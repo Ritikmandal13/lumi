@@ -46,8 +46,13 @@ void oled_draw_eyes(int mood, int lookDir);
 void oled_draw_blink(void);
 
 /**
+ * Trigger an instant winking eye animation.
+ */
+void oled_draw_wink(void);
+
+/**
  * Set emotion by string name (from LiveKit DataChannel).
- * Supported: "happy", "neutral", "sleep", "angry", "upset", "sad", "love", "curious"
+ * Supported: "happy", "curious", "love", "excited", "wink", "sleep", "sleepy", "angry", "upset", "sad", "neutral"
  */
 void oled_set_emotion_by_name(const char *name);
 

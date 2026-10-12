@@ -208,8 +208,9 @@ export default function DriveScreen() {
         const r = await robotService.getRobot(id as string);
         if (mounted) {
           setRobot(r);
-          if ((r as any)?.ip) {
-            setCameraStreamUrl(`http://${(r as any).ip}:81`);
+          const robotIp = r?.localIp || (r as any)?.local_ip || (r as any)?.ip;
+          if (robotIp) {
+            setCameraStreamUrl(`http://${robotIp}:81`);
           }
         }
 
@@ -225,8 +226,9 @@ export default function DriveScreen() {
               if (telem.currentEmotion) {
                 setActiveEmotion(telem.currentEmotion as Emotion);
               }
-              if ((telem as any)?.ip) {
-                setCameraStreamUrl(`http://${(telem as any).ip}:81`);
+              const streamIp = (telem as any)?.localIp || (telem as any)?.local_ip || (telem as any)?.ip;
+              if (streamIp) {
+                setCameraStreamUrl(`http://${streamIp}:81`);
               }
             }
           },
