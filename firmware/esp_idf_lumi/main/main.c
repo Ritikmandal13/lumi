@@ -428,6 +428,7 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
 }
 
 static bool s_room_connected = false;
+static livekit_room_handle_t s_room_handle = NULL;
 
 static void on_room_state_changed(livekit_connection_state_t state, void *ctx) {
     ESP_LOGI(TAG, "LiveKit Room state changed: %s", livekit_connection_state_str(state));
@@ -442,10 +443,10 @@ static void on_room_state_changed(livekit_connection_state_t state, void *ctx) {
 
 // Dedicated task for publishing camera frames worldwide over LiveKit WebRTC
 static void video_stream_task(void *pvParameters) {
-    livekit_room_handle_t *p_room = (livekit_room_handle_t *)pvParameters;
+    (void)pvParameters;
     ESP_LOGI(TAG, "🎥 Worldwide LiveKit WebRTC Video Stream Task started on Core 1");
     while (1) {
-        if (s_room_connected && p_room && *p_room) {
+        if (s_room_connected && s_room_handle) {
             camera_fb_t *fb = NULL;
             if (s_camera_mutex && xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 fb = esp_camera_fb_get();
@@ -459,12 +460,16 @@ static void video_stream_task(void *pvParameters) {
                         .topic = "video",
                         .lossy = true
                     };
-                    livekit_room_publish_data(*p_room, &pub_opts);
+                    livekit_err_t res = livekit_room_publish_data(s_room_handle, &pub_opts);
                     esp_camera_fb_return(fb);
+                    if (res != LIVEKIT_ERR_NONE) {
+                        // SCTP send queue is temporarily full, yield a bit to let it drain
+                        vTaskDelay(pdMS_TO_TICKS(50));
+                    }
                 }
                 xSemaphoreGive(s_camera_mutex);
             }
-            vTaskDelay(pdMS_TO_TICKS(66)); // ~15 FPS smooth worldwide stream
+            vTaskDelay(pdMS_TO_TICKS(100)); // ~10 FPS for reliable, jitter-free transmission without queue overflows
         } else {
             vTaskDelay(pdMS_TO_TICKS(200));
         }
@@ -575,7 +580,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "Connecting to LiveKit Room at %s...", livekit_url);
 
     // 3. Connect LiveKit Room & Publish Camera Video
-    livekit_room_handle_t room_handle = NULL;
+    s_room_handle = NULL;
     livekit_room_options_t room_options = {
         .publish = {
             .kind = LIVEKIT_MEDIA_TYPE_NONE,
@@ -587,12 +592,12 @@ void app_main(void) {
         .on_state_changed = on_room_state_changed,
     };
 
-    livekit_err_t lk_err = livekit_room_create(&room_handle, &room_options);
+    livekit_err_t lk_err = livekit_room_create(&s_room_handle, &room_options);
     if (lk_err == LIVEKIT_ERR_NONE) {
-        livekit_room_connect(room_handle, livekit_url, livekit_token);
+        livekit_room_connect(s_room_handle, livekit_url, livekit_token);
         ESP_LOGI(TAG, "Robot live! Connected to LiveKit Cloud WebRTC room!");
         // Launch worldwide camera streaming task on Core 1
-        xTaskCreatePinnedToCore(video_stream_task, "lk_vid_task", 8192, &room_handle, 5, NULL, 1);
+        xTaskCreatePinnedToCore(video_stream_task, "lk_vid_task", 8192, NULL, 5, NULL, 1);
     } else {
         ESP_LOGE(TAG, "Failed to create LiveKit room object, error: %d", lk_err);
     }
@@ -606,12 +611,12 @@ void app_main(void) {
              LUMI_ID, DEVICE_SECRET, s_robot_ip);
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        vTaskDelay(pdMS_TO_TICKS(30000));
         char *hb_res = http_post_json(hb_url, hb_body);
         if (hb_res) free(hb_res);
 
         // Also publish real-time telemetry over WebRTC Data Channel if connected
-        if (room_handle != NULL) {
+        if (s_room_handle != NULL) {
             char telem_json[256];
             snprintf(telem_json, sizeof(telem_json),
                      "{\"t\":\"telemetry\",\"batteryPercent\":90,\"wifiSignal\":4,\"latencyMs\":40,\"currentEmotion\":\"happy\",\"ip\":\"%s\"}",
@@ -625,7 +630,7 @@ void app_main(void) {
                 .topic = "telemetry",
                 .lossy = true
             };
-            livekit_room_publish_data(room_handle, &pub_opts);
+            livekit_room_publish_data(s_room_handle, &pub_opts);
         }
     }
 }
