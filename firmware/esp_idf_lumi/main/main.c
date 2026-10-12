@@ -32,6 +32,7 @@
 
 // Audio Codec & AV Render
 #include "esp_codec_dev.h"
+#include "esp_codec_dev_defaults.h"
 #include "av_render_default.h"
 #include "esp_audio_dec_default.h"
 
