@@ -115,6 +115,7 @@ export default function RobotDetailScreen() {
     }
     return () => {
       active = false;
+      liveService.disconnect();
     };
   }, [id, isOnline]);
 

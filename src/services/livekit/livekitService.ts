@@ -26,6 +26,7 @@ import type {
 } from '../interfaces';
 
 let activeRoom: Room | null = null;
+let activeRobotId: string | null = null;
 let activeCallbacks: LiveSessionCallbacks | null = null;
 let currentConnectionState: ConnectionState = 'idle';
 let currentVideoTrack: RemoteTrack | null = null;
@@ -33,6 +34,10 @@ const videoTrackListeners = new Set<(track: RemoteTrack | null) => void>();
 
 const cloudVideoListeners = new Set<(uri: string | null) => void>();
 let latestCloudVideoUri: string | null = null;
+
+export function getActiveRobotId(): string | null {
+  return activeRobotId;
+}
 
 const B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 function uint8ArrayToBase64(bytes: Uint8Array): string {
@@ -112,11 +117,32 @@ export async function setRobotMicrophone(enabled: boolean): Promise<void> {
 
 export const livekitLiveService: LiveService = {
   async connect(robotId: string, callbacks: LiveSessionCallbacks): Promise<void> {
-    // If already connected to another room, disconnect first
+    // 1. If already connected to the same robot, reuse active room session seamlessly
+    if (
+      activeRoom &&
+      activeRobotId === robotId &&
+      (currentConnectionState === 'connected' ||
+        currentConnectionState === 'weak' ||
+        currentConnectionState === 'connecting')
+    ) {
+      console.log('[LiveKit] Reusing active session for robot:', robotId);
+      activeCallbacks = callbacks;
+      callbacks.onConnectionStateChange(currentConnectionState);
+      if (currentVideoTrack) {
+        notifyVideoTrackListeners(currentVideoTrack);
+      }
+      if (latestCloudVideoUri) {
+        notifyCloudVideoFrame(latestCloudVideoUri);
+      }
+      return;
+    }
+
+    // 2. If connected to a different robot, disconnect first
     if (activeRoom) {
       await this.disconnect();
     }
 
+    activeRobotId = robotId;
     activeCallbacks = callbacks;
     currentConnectionState = 'connecting';
     callbacks.onConnectionStateChange('connecting');
@@ -178,6 +204,8 @@ export const livekitLiveService: LiveService = {
 
       room.on(RoomEvent.Disconnected, () => {
         currentConnectionState = 'ended';
+        activeRobotId = null;
+        activeRoom = null;
         activeCallbacks?.onConnectionStateChange('ended');
         notifyVideoTrackListeners(null);
         notifyCloudVideoFrame(null);
@@ -283,6 +311,7 @@ export const livekitLiveService: LiveService = {
 
   async disconnect(): Promise<void> {
     currentConnectionState = 'ended';
+    activeRobotId = null;
     if (activeCallbacks) {
       activeCallbacks.onConnectionStateChange('ended');
       activeCallbacks = null;

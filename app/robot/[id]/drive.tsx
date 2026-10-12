@@ -90,6 +90,152 @@ const GESTURES_LIST = [
   { name: 'peekaboo', label: 'Peekaboo' },
 ];
 
+interface DoubleBufferedCameraFeedProps {
+  videoTrack: any;
+  cameraStreamUrl: string | null;
+  snapshotKey: number;
+  onHasCloudFrameChange?: (hasFrame: boolean) => void;
+}
+
+const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
+  videoTrack,
+  cameraStreamUrl,
+  snapshotKey,
+  onHasCloudFrameChange,
+}: DoubleBufferedCameraFeedProps) {
+  const [frameA, setFrameA] = useState<string | null>(null);
+  const [frameB, setFrameB] = useState<string | null>(null);
+  const [activeLayer, setActiveLayer] = useState<'A' | 'B'>('A');
+  const activeLayerRef = useRef<'A' | 'B'>('A');
+  const [hasCloudFrame, setHasCloudFrame] = useState(false);
+  const flipTimerRef = useRef<any>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    const unsub = subscribeToCloudVideoFrame((uri) => {
+      if (!mounted) return;
+      if (!uri) {
+        setHasCloudFrame(false);
+        onHasCloudFrameChange?.(false);
+        return;
+      }
+      setHasCloudFrame(true);
+      onHasCloudFrameChange?.(true);
+
+      if (activeLayerRef.current === 'A') {
+        setFrameB(uri);
+        if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
+        flipTimerRef.current = setTimeout(() => {
+          if (mounted) {
+            activeLayerRef.current = 'B';
+            setActiveLayer('B');
+          }
+        }, 75);
+      } else {
+        setFrameA(uri);
+        if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
+        flipTimerRef.current = setTimeout(() => {
+          if (mounted) {
+            activeLayerRef.current = 'A';
+            setActiveLayer('A');
+          }
+        }, 75);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
+      unsub();
+    };
+  }, [onHasCloudFrameChange]);
+
+  const handleLoadA = () => {
+    if (activeLayerRef.current === 'B') {
+      if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
+      activeLayerRef.current = 'A';
+      setActiveLayer('A');
+    }
+  };
+
+  const handleLoadB = () => {
+    if (activeLayerRef.current === 'A') {
+      if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
+      activeLayerRef.current = 'B';
+      setActiveLayer('B');
+    }
+  };
+
+  if (hasCloudFrame && (frameA || frameB)) {
+    const showA = (!frameB && !!frameA) || (activeLayer === 'A' && !!frameA);
+    const showB = (!frameA && !!frameB) || (activeLayer === 'B' && !!frameB);
+
+    return (
+      <View style={StyleSheet.absoluteFill}>
+        {frameA ? (
+          <Image
+            source={{ uri: frameA }}
+            style={[
+              styles.cameraImageFull,
+              {
+                opacity: showA ? 1 : 0,
+                zIndex: showA ? 2 : 1,
+              },
+            ]}
+            resizeMode="contain"
+            onLoad={handleLoadA}
+          />
+        ) : null}
+        {frameB ? (
+          <Image
+            source={{ uri: frameB }}
+            style={[
+              styles.cameraImageFull,
+              {
+                opacity: showB ? 1 : 0,
+                zIndex: showB ? 2 : 1,
+              },
+            ]}
+            resizeMode="contain"
+            onLoad={handleLoadB}
+          />
+        ) : null}
+      </View>
+    );
+  }
+
+  if (videoTrack) {
+    return (
+      <VideoView
+        videoTrack={videoTrack}
+        style={StyleSheet.absoluteFill}
+        objectFit="contain"
+      />
+    );
+  }
+
+  if (cameraStreamUrl) {
+    return (
+      <Image
+        key={snapshotKey}
+        source={{ uri: `${cameraStreamUrl}/capture?t=${snapshotKey}` }}
+        style={StyleSheet.absoluteFill}
+        resizeMode="contain"
+      />
+    );
+  }
+
+  return (
+    <>
+      <View style={styles.perspectiveFloor} />
+      <View style={styles.reticleCenter}>
+        <View style={styles.reticleLineH} />
+        <View style={styles.reticleLineV} />
+      </View>
+    </>
+  );
+});
+
 export default function DriveScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -120,8 +266,8 @@ export default function DriveScreen() {
   // LiveKit Remote Video Track
   const [videoTrack, setVideoTrack] = useState<any>(null);
 
-  // Worldwide LiveKit WebRTC Cloud Video Frame
-  const [cloudVideoFrame, setCloudVideoFrame] = useState<string | null>(null);
+  // Worldwide LiveKit WebRTC Cloud Video Frame active state
+  const [hasCloudFeed, setHasCloudFeed] = useState(false);
 
   // Local camera stream from robot
   const [cameraStreamUrl, setCameraStreamUrl] = useState<string | null>(null);
@@ -131,12 +277,8 @@ export default function DriveScreen() {
     const unsubTrack = subscribeToRobotVideoTrack((track) => {
       setVideoTrack(track);
     });
-    const unsubCloud = subscribeToCloudVideoFrame((frameUri) => {
-      setCloudVideoFrame(frameUri);
-    });
     return () => {
       unsubTrack();
-      unsubCloud();
     };
   }, []);
 
@@ -245,7 +387,6 @@ export default function DriveScreen() {
 
     return () => {
       mounted = false;
-      liveService.disconnect();
       controlChannel.stopDriving();
     };
   }, [id]);
@@ -461,42 +602,19 @@ export default function DriveScreen() {
 
       {/* ── Camera Viewport (LiveKit Remote Cloud WebRTC) ── */}
       <View style={styles.cameraViewport}>
-        {cloudVideoFrame ? (
-          <Image
-            source={{ uri: cloudVideoFrame }}
-            style={StyleSheet.absoluteFill}
-            resizeMode="cover"
-          />
-        ) : videoTrack ? (
-          <VideoView
-            videoTrack={videoTrack}
-            style={StyleSheet.absoluteFill}
-            objectFit="cover"
-          />
-        ) : cameraStreamUrl ? (
-          <Image
-            key={snapshotKey}
-            source={{ uri: `${cameraStreamUrl}/capture?t=${snapshotKey}` }}
-            style={StyleSheet.absoluteFill}
-            resizeMode="cover"
-          />
-        ) : (
-          <>
-            {/* Room grid simulation */}
-            <View style={styles.perspectiveFloor} />
-            <View style={styles.reticleCenter}>
-              <View style={styles.reticleLineH} />
-              <View style={styles.reticleLineV} />
-            </View>
-          </>
-        )}
+        <DoubleBufferedCameraFeed
+          videoTrack={videoTrack}
+          cameraStreamUrl={cameraStreamUrl}
+          snapshotKey={snapshotKey}
+          onHasCloudFrameChange={setHasCloudFeed}
+        />
 
         {/* Bottom stream indicators */}
         <View style={styles.viewportOverlayBottom}>
           <View style={styles.videoQualityTag}>
             <Video size={12} color="#94A3B8" />
             <Text style={styles.videoQualityText}>
-              {cloudVideoFrame || videoTrack
+              {hasCloudFeed || videoTrack
                 ? 'LiveKit Cloud WebRTC (Worldwide)'
                 : cameraStreamUrl
                 ? `OV3660 HD Stream (${cameraStreamUrl}/stream)`
@@ -855,6 +973,11 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  cameraImageFull: {
+    width: '100%',
+    height: '100%',
+    position: 'absolute',
   },
   perspectiveFloor: {
     position: 'absolute',

@@ -206,7 +206,7 @@ static esp_err_t init_camera(void) {
 
     sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
-        s->set_vflip(s, 1);
+        s->set_vflip(s, 0);
         s->set_hmirror(s, 0);
     }
     ESP_LOGI(TAG, "OV3660 camera initialized successfully!");
@@ -429,6 +429,8 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
 
 static bool s_room_connected = false;
 static livekit_room_handle_t s_room_handle = NULL;
+static char s_livekit_url[128] = {0};
+static char s_livekit_token[512] = {0};
 
 static void on_room_state_changed(livekit_connection_state_t state, void *ctx) {
     ESP_LOGI(TAG, "LiveKit Room state changed: %s", livekit_connection_state_str(state));
@@ -555,29 +557,26 @@ void app_main(void) {
     snprintf(tok_url, sizeof(tok_url), "%s/functions/v1/robot-token", SUPABASE_BASE_URL);
     char *res = http_post_json(tok_url, req_body);
     
-    char livekit_url[128] = {0};
-    char livekit_token[512] = {0};
-
     if (res) {
         cJSON *root = cJSON_Parse(res);
         if (root) {
             cJSON *token_item = cJSON_GetObjectItem(root, "token");
             cJSON *url_item = cJSON_GetObjectItem(root, "url");
-            if (token_item && url_item) {
-                strncpy(livekit_token, token_item->valuestring, sizeof(livekit_token) - 1);
-                strncpy(livekit_url, url_item->valuestring, sizeof(livekit_url) - 1);
+            if (token_item && url_item && token_item->valuestring && url_item->valuestring) {
+                strncpy(s_livekit_token, token_item->valuestring, sizeof(s_livekit_token) - 1);
+                strncpy(s_livekit_url, url_item->valuestring, sizeof(s_livekit_url) - 1);
             }
             cJSON_Delete(root);
         }
         free(res);
     }
 
-    if (strlen(livekit_token) == 0) {
+    if (strlen(s_livekit_token) == 0) {
         ESP_LOGE(TAG, "Failed to get LiveKit token");
         return;
     }
 
-    ESP_LOGI(TAG, "Connecting to LiveKit Room at %s...", livekit_url);
+    ESP_LOGI(TAG, "Connecting to LiveKit Room at %s...", s_livekit_url);
 
     // 3. Connect LiveKit Room & Publish Camera Video
     s_room_handle = NULL;
@@ -594,7 +593,7 @@ void app_main(void) {
 
     livekit_err_t lk_err = livekit_room_create(&s_room_handle, &room_options);
     if (lk_err == LIVEKIT_ERR_NONE) {
-        livekit_room_connect(s_room_handle, livekit_url, livekit_token);
+        livekit_room_connect(s_room_handle, s_livekit_url, s_livekit_token);
         ESP_LOGI(TAG, "Robot live! Connected to LiveKit Cloud WebRTC room!");
         // Launch worldwide camera streaming task on Core 1
         xTaskCreatePinnedToCore(video_stream_task, "lk_vid_task", 8192, NULL, 5, NULL, 1);
@@ -615,8 +614,32 @@ void app_main(void) {
         char *hb_res = http_post_json(hb_url, hb_body);
         if (hb_res) free(hb_res);
 
+        // Auto-reconnect if LiveKit room connection was lost or dropped
+        if (!s_room_connected && s_room_handle != NULL && strlen(s_livekit_token) > 0) {
+            ESP_LOGW(TAG, "LiveKit room disconnected. Attempting auto-reconnect...");
+            livekit_err_t rec_err = livekit_room_connect(s_room_handle, s_livekit_url, s_livekit_token);
+            if (rec_err != LIVEKIT_ERR_NONE) {
+                ESP_LOGE(TAG, "LiveKit reconnect failed: %d. Refreshing token...", rec_err);
+                char *new_res = http_post_json(tok_url, req_body);
+                if (new_res) {
+                    cJSON *tok_root = cJSON_Parse(new_res);
+                    if (tok_root) {
+                        cJSON *t_item = cJSON_GetObjectItem(tok_root, "token");
+                        cJSON *u_item = cJSON_GetObjectItem(tok_root, "url");
+                        if (t_item && u_item && t_item->valuestring && u_item->valuestring) {
+                            strncpy(s_livekit_token, t_item->valuestring, sizeof(s_livekit_token) - 1);
+                            strncpy(s_livekit_url, u_item->valuestring, sizeof(s_livekit_url) - 1);
+                            livekit_room_connect(s_room_handle, s_livekit_url, s_livekit_token);
+                        }
+                        cJSON_Delete(tok_root);
+                    }
+                    free(new_res);
+                }
+            }
+        }
+
         // Also publish real-time telemetry over WebRTC Data Channel if connected
-        if (s_room_handle != NULL) {
+        if (s_room_connected && s_room_handle != NULL) {
             char telem_json[256];
             snprintf(telem_json, sizeof(telem_json),
                      "{\"t\":\"telemetry\",\"batteryPercent\":90,\"wifiSignal\":4,\"latencyMs\":40,\"currentEmotion\":\"happy\",\"ip\":\"%s\"}",
