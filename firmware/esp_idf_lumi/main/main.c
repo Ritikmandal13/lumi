@@ -32,7 +32,6 @@
 
 // Audio Codec & AV Render
 #include "esp_codec_dev.h"
-#include "dummy_codec.h"
 #include "av_render_default.h"
 #include "esp_audio_dec_default.h"
 
@@ -252,12 +251,7 @@ static esp_err_t init_speaker_audio(void) {
     // Register audio decoders (Opus, G711) for LiveKit WebRTC audio stream
     esp_audio_dec_register_default();
 
-    // Wrap I2S handle into esp_codec_dev via dummy_codec for LiveKit AV renderer
-    dummy_codec_cfg_t dummy_cfg = {
-        .pa_pin = -1,
-    };
-    const audio_codec_if_t *codec = dummy_codec_new(&dummy_cfg);
-
+    // Wrap I2S handle into esp_codec_dev (codec_if is NULL for direct I2S DAC amplifier MAX98357A)
     audio_codec_i2s_cfg_t i2s_cfg = {
         .port = I2S_NUM_0,
         .tx_handle = s_i2s_tx_handle,
@@ -266,7 +260,7 @@ static esp_err_t init_speaker_audio(void) {
     const audio_codec_data_if_t *data = audio_codec_new_i2s_data(&i2s_cfg);
 
     esp_codec_dev_cfg_t dev_cfg = {
-        .codec_if = codec,
+        .codec_if = NULL,
         .data_if  = data,
         .dev_type = ESP_CODEC_DEV_TYPE_OUT,
     };

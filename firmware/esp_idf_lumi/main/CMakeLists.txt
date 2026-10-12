@@ -16,6 +16,7 @@ idf_component_register(
         livekit
         mbedtls
         esp_codec_dev
+        esp_audio_codec
         av_render
 )
 
