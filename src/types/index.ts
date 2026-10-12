@@ -54,7 +54,9 @@ export type ControlMessage =
   | { t: 'stop' }
   | { t: 'play'; name: string }
   | { t: 'emotion'; name: string }
-  | { t: 'volume'; value: number };
+  | { t: 'volume'; value: number }
+  | { t: 'mic_start' }
+  | { t: 'mic_stop' };
 
 export interface User {
   id: string;

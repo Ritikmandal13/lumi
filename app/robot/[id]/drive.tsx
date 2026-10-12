@@ -103,103 +103,35 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
   snapshotKey,
   onHasCloudFrameChange,
 }: DoubleBufferedCameraFeedProps) {
-  const [frameA, setFrameA] = useState<string | null>(null);
-  const [frameB, setFrameB] = useState<string | null>(null);
-  const [activeLayer, setActiveLayer] = useState<'A' | 'B'>('A');
-  const activeLayerRef = useRef<'A' | 'B'>('A');
-  const [hasCloudFrame, setHasCloudFrame] = useState(false);
-  const flipTimerRef = useRef<any>(null);
+  const [currentFrame, setCurrentFrame] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
     const unsub = subscribeToCloudVideoFrame((uri) => {
       if (!mounted) return;
-      if (!uri) {
-        setHasCloudFrame(false);
-        onHasCloudFrameChange?.(false);
-        return;
-      }
-      setHasCloudFrame(true);
-      onHasCloudFrameChange?.(true);
-
-      if (activeLayerRef.current === 'A') {
-        setFrameB(uri);
-        if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
-        flipTimerRef.current = setTimeout(() => {
-          if (mounted) {
-            activeLayerRef.current = 'B';
-            setActiveLayer('B');
-          }
-        }, 75);
+      if (uri) {
+        setCurrentFrame(uri);
+        onHasCloudFrameChange?.(true);
       } else {
-        setFrameA(uri);
-        if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
-        flipTimerRef.current = setTimeout(() => {
-          if (mounted) {
-            activeLayerRef.current = 'A';
-            setActiveLayer('A');
-          }
-        }, 75);
+        onHasCloudFrameChange?.(false);
       }
     });
 
     return () => {
       mounted = false;
-      if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
       unsub();
     };
   }, [onHasCloudFrameChange]);
 
-  const handleLoadA = () => {
-    if (activeLayerRef.current === 'B') {
-      if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
-      activeLayerRef.current = 'A';
-      setActiveLayer('A');
-    }
-  };
-
-  const handleLoadB = () => {
-    if (activeLayerRef.current === 'A') {
-      if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
-      activeLayerRef.current = 'B';
-      setActiveLayer('B');
-    }
-  };
-
-  if (hasCloudFrame && (frameA || frameB)) {
-    const showA = (!frameB && !!frameA) || (activeLayer === 'A' && !!frameA);
-    const showB = (!frameA && !!frameB) || (activeLayer === 'B' && !!frameB);
-
+  if (currentFrame) {
     return (
       <View style={StyleSheet.absoluteFill}>
-        {frameA ? (
-          <Image
-            source={{ uri: frameA }}
-            style={[
-              styles.cameraImageFull,
-              {
-                opacity: showA ? 1 : 0,
-                zIndex: showA ? 2 : 1,
-              },
-            ]}
-            resizeMode="contain"
-            onLoad={handleLoadA}
-          />
-        ) : null}
-        {frameB ? (
-          <Image
-            source={{ uri: frameB }}
-            style={[
-              styles.cameraImageFull,
-              {
-                opacity: showB ? 1 : 0,
-                zIndex: showB ? 2 : 1,
-              },
-            ]}
-            resizeMode="contain"
-            onLoad={handleLoadB}
-          />
-        ) : null}
+        <Image
+          source={{ uri: currentFrame }}
+          style={styles.cameraImageFull}
+          resizeMode="cover"
+          fadeDuration={0}
+        />
       </View>
     );
   }
@@ -209,7 +141,7 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
       <VideoView
         videoTrack={videoTrack}
         style={StyleSheet.absoluteFill}
-        objectFit="contain"
+        objectFit="cover"
       />
     );
   }
@@ -220,20 +152,13 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
         key={snapshotKey}
         source={{ uri: `${cameraStreamUrl}/capture?t=${snapshotKey}` }}
         style={StyleSheet.absoluteFill}
-        resizeMode="contain"
+        resizeMode="cover"
+        fadeDuration={0}
       />
     );
   }
 
-  return (
-    <>
-      <View style={styles.perspectiveFloor} />
-      <View style={styles.reticleCenter}>
-        <View style={styles.reticleLineH} />
-        <View style={styles.reticleLineV} />
-      </View>
-    </>
-  );
+  return null;
 });
 
 export default function DriveScreen() {
@@ -292,9 +217,15 @@ export default function DriveScreen() {
     }
   }, [videoTrack, cameraStreamUrl]);
 
-  // Sync PTT talk state with robot microphone
+  // Sync PTT talk state with robot microphone and send walkie-talkie cues
   useEffect(() => {
-    setRobotMicrophone(isTalking || isMicLocked);
+    const active = isTalking || isMicLocked;
+    setRobotMicrophone(active);
+    if (active) {
+      controlChannel.send({ t: 'mic_start' });
+    } else {
+      controlChannel.send({ t: 'mic_stop' });
+    }
   }, [isTalking, isMicLocked]);
 
   const ensureMicrophonePermission = async (): Promise<boolean> => {

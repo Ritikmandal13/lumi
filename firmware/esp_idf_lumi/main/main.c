@@ -28,6 +28,8 @@
 #include "esp_camera.h"
 #include "driver/ledc.h"
 #include "driver/i2s_std.h"
+#include "driver/gpio.h"
+#include "esp_rom_sys.h"
 #include <math.h>
 
 // LiveKit SDK
@@ -91,7 +93,27 @@ static const char *TAG = "LUMI_ROBOT";
 // 3. MOTOR CONTROLLER
 // ==============================================================================
 
+// Turn off the blinding onboard WS2812 RGB LED sharing GPIO 48
+static void ws2812_turn_off_gpio48(void) {
+    gpio_reset_pin(GPIO_NUM_48);
+    gpio_set_direction(GPIO_NUM_48, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_NUM_48, 0);
+    esp_rom_delay_us(350); // WS2812 reset signal (>300us LOW)
+    // Send 24 bits of 0 (GRB = 0, 0, 0)
+    for (int i = 0; i < 24; i++) {
+        gpio_set_level(GPIO_NUM_48, 1);
+        esp_rom_delay_us(1);
+        gpio_set_level(GPIO_NUM_48, 0);
+        esp_rom_delay_us(2);
+    }
+    gpio_set_level(GPIO_NUM_48, 0);
+    esp_rom_delay_us(350);
+}
+
 static void init_motors(void) {
+    // Extinguish the blinding onboard WS2812 LED on boot
+    ws2812_turn_off_gpio48();
+
     ledc_timer_config_t timer_conf = {
         .speed_mode = LEDC_MODE,
         .duty_resolution = LEDC_TIMER_8_BIT, // 0-255
@@ -497,11 +519,20 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
             if (x_item && y_item) {
                 float x = (float)x_item->valuedouble;
                 float y = (float)y_item->valuedouble;
+                ESP_LOGI(TAG, "🕹️ Drive Command: x=%.2f, y=%.2f", x, y);
                 apply_differential_drive(x, y);
             }
         } else if (strcmp(t->valuestring, "stop") == 0) {
             stop_motors();
-            ESP_LOGW(TAG, "EMERGENCY STOP EXECUTED");
+            ESP_LOGW(TAG, "🛑 EMERGENCY / JOYSTICK STOP EXECUTED");
+        } else if (strcmp(t->valuestring, "mic_start") == 0) {
+            ESP_LOGI(TAG, "🎙️ Mic Push-to-Talk active!");
+            play_tone(1046, 80);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            play_tone(1318, 100);
+        } else if (strcmp(t->valuestring, "mic_stop") == 0) {
+            ESP_LOGI(TAG, "🎙️ Mic Push-to-Talk released.");
+            play_tone(880, 80);
         } else if (strcmp(t->valuestring, "emotion") == 0) {
             cJSON *name = cJSON_GetObjectItem(json, "name");
             if (name && name->valuestring) {

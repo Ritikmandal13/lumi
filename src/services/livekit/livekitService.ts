@@ -350,9 +350,11 @@ export const livekitControlChannel: ControlChannel = {
     try {
       const encoder = new TextEncoder();
       const payload = encoder.encode(JSON.stringify(message));
-      // Use lossy for frequent joystick drive packets, reliable for discrete commands
-      const reliable = message.t !== 'drive';
-      activeRoom.localParticipant.publishData(payload, { reliable });
+      // Always publish reliably to guarantee drive, stop, and control commands are not dropped
+      activeRoom.localParticipant.publishData(payload, {
+        reliable: true,
+        topic: message.t,
+      });
     } catch (err) {
       console.warn('[LiveKit] Error sending control packet:', err);
     }
