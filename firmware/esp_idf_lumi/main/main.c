@@ -30,12 +30,6 @@
 #include "driver/i2s_std.h"
 #include <math.h>
 
-// Audio Codec & AV Render
-#include "esp_codec_dev.h"
-#include "esp_codec_dev_defaults.h"
-#include "av_render_default.h"
-#include "esp_audio_dec_default.h"
-
 // LiveKit SDK
 #include "livekit.h"
 #include "oled.h"
@@ -183,7 +177,6 @@ static void apply_differential_drive(float x, float y) {
 // ==============================================================================
 
 static i2s_chan_handle_t s_i2s_tx_handle = NULL;
-static av_render_handle_t s_av_renderer = NULL;
 
 static void play_tone(uint32_t freq_hz, uint32_t duration_ms) {
     if (!s_i2s_tx_handle) return;
@@ -210,6 +203,12 @@ static void play_robot_greeting_chime(void) {
     play_tone(659, 100);
     vTaskDelay(pdMS_TO_TICKS(30));
     play_tone(784, 180);
+}
+
+static void play_connected_chime(void) {
+    play_tone(659, 100);
+    vTaskDelay(pdMS_TO_TICKS(30));
+    play_tone(880, 150);
 }
 
 static esp_err_t init_speaker_audio(void) {
@@ -248,50 +247,6 @@ static esp_err_t init_speaker_audio(void) {
 
     // Play pleasant greeting chime so client verifies speaker hardware on boot
     play_robot_greeting_chime();
-
-    // Register audio decoders (Opus, G711) for LiveKit WebRTC audio stream
-    esp_audio_dec_register_default();
-
-    // Wrap I2S handle into esp_codec_dev (codec_if is NULL for direct I2S DAC amplifier MAX98357A)
-    audio_codec_i2s_cfg_t i2s_cfg = {
-        .port = I2S_NUM_0,
-        .tx_handle = s_i2s_tx_handle,
-        .rx_handle = NULL,
-    };
-    const audio_codec_data_if_t *data = audio_codec_new_i2s_data(&i2s_cfg);
-
-    esp_codec_dev_cfg_t dev_cfg = {
-        .codec_if = NULL,
-        .data_if  = data,
-        .dev_type = ESP_CODEC_DEV_TYPE_OUT,
-    };
-    esp_codec_dev_handle_t play_dev = esp_codec_dev_new(&dev_cfg);
-    if (!play_dev) {
-        ESP_LOGW(TAG, "Warning: esp_codec_dev_new returned NULL");
-        return ESP_OK;
-    }
-
-    i2s_render_cfg_t i2s_render_cfg = {
-        .play_handle = play_dev,
-    };
-    audio_render_handle_t audio_renderer = av_render_alloc_i2s_render(&i2s_render_cfg);
-
-    av_render_cfg_t render_cfg = {
-        .audio_render = audio_renderer,
-        .audio_raw_fifo_size = 8 * 4096,
-        .audio_render_fifo_size = 100 * 1024,
-        .allow_drop_data = false,
-    };
-    s_av_renderer = av_render_open(&render_cfg);
-    if (s_av_renderer) {
-        av_render_audio_frame_info_t frame_info = {
-            .sample_rate = 16000,
-            .channel = 2,
-            .bits_per_sample = 16,
-        };
-        av_render_set_fixed_frame_info(s_av_renderer, &frame_info);
-        ESP_LOGI(TAG, "LiveKit WebRTC Audio Renderer opened successfully!");
-    }
 
     return ESP_OK;
 }
@@ -563,6 +518,14 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
                     play_tone(1046, 120);
                 }
             }
+        } else if (strcmp(t->valuestring, "beep") == 0 || strcmp(t->valuestring, "horn") == 0) {
+            play_tone(880, 250);
+        } else if (strcmp(t->valuestring, "sound") == 0) {
+            cJSON *freq_item = cJSON_GetObjectItem(json, "freq");
+            cJSON *dur_item = cJSON_GetObjectItem(json, "dur");
+            uint32_t freq = freq_item ? freq_item->valueint : 880;
+            uint32_t dur = dur_item ? dur_item->valueint : 200;
+            play_tone(freq, dur);
         }
     }
     cJSON_Delete(json);
@@ -579,6 +542,7 @@ static void on_room_state_changed(livekit_connection_state_t state, void *ctx) {
         s_room_connected = true;
         oled_set_paired(true);
         oled_set_emotion_by_name("happy");
+        play_connected_chime();
     } else {
         s_room_connected = false;
     }
@@ -720,15 +684,14 @@ void app_main(void) {
 
     ESP_LOGI(TAG, "Connecting to LiveKit Room at %s...", s_livekit_url);
 
-    // 3. Connect LiveKit Room & Publish Camera Video & Play Remote Audio
+    // 3. Connect LiveKit Room & WebRTC Data Channel
     s_room_handle = NULL;
     livekit_room_options_t room_options = {
         .publish = {
             .kind = LIVEKIT_MEDIA_TYPE_NONE,
         },
         .subscribe = {
-            .kind = s_av_renderer != NULL ? LIVEKIT_MEDIA_TYPE_AUDIO : LIVEKIT_MEDIA_TYPE_NONE,
-            .renderer = s_av_renderer,
+            .kind = LIVEKIT_MEDIA_TYPE_NONE,
         },
         .on_data_received = on_data_received,
         .on_state_changed = on_room_state_changed,

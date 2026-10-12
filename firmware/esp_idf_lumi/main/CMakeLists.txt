@@ -15,10 +15,6 @@ idf_component_register(
         driver
         livekit
         mbedtls
-        esp_codec_dev
-        esp_audio_codec
-        esp_lcd
-        av_render
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-deprecated-declarations -Wno-unused-variable)
