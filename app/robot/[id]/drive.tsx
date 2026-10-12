@@ -61,6 +61,7 @@ import {
   controlChannel,
   sessionService,
   subscribeToRobotVideoTrack,
+  subscribeToCloudVideoFrame,
   setRobotMicrophone,
 } from '../../../src/services';
 import { showAlert } from '../../../src/features/dialog/dialogStore';
@@ -119,15 +120,24 @@ export default function DriveScreen() {
   // LiveKit Remote Video Track
   const [videoTrack, setVideoTrack] = useState<any>(null);
 
+  // Worldwide LiveKit WebRTC Cloud Video Frame
+  const [cloudVideoFrame, setCloudVideoFrame] = useState<string | null>(null);
+
   // Local camera stream from robot
   const [cameraStreamUrl, setCameraStreamUrl] = useState<string | null>(null);
   const [snapshotKey, setSnapshotKey] = useState(Date.now());
 
   useEffect(() => {
-    const unsubscribe = subscribeToRobotVideoTrack((track) => {
+    const unsubTrack = subscribeToRobotVideoTrack((track) => {
       setVideoTrack(track);
     });
-    return unsubscribe;
+    const unsubCloud = subscribeToCloudVideoFrame((frameUri) => {
+      setCloudVideoFrame(frameUri);
+    });
+    return () => {
+      unsubTrack();
+      unsubCloud();
+    };
   }, []);
 
   // Poll camera snapshot when on local stream and no WebRTC video track
@@ -449,7 +459,13 @@ export default function DriveScreen() {
 
       {/* ── Camera Viewport (LiveKit Remote Cloud WebRTC) ── */}
       <View style={styles.cameraViewport}>
-        {videoTrack ? (
+        {cloudVideoFrame ? (
+          <Image
+            source={{ uri: cloudVideoFrame }}
+            style={StyleSheet.absoluteFill}
+            resizeMode="cover"
+          />
+        ) : videoTrack ? (
           <VideoView
             videoTrack={videoTrack}
             style={StyleSheet.absoluteFill}
@@ -478,8 +494,8 @@ export default function DriveScreen() {
           <View style={styles.videoQualityTag}>
             <Video size={12} color="#94A3B8" />
             <Text style={styles.videoQualityText}>
-              {videoTrack
-                ? 'LiveKit Cloud WebRTC'
+              {cloudVideoFrame || videoTrack
+                ? 'LiveKit Cloud WebRTC (Worldwide)'
                 : cameraStreamUrl
                 ? `OV3660 HD Stream (${cameraStreamUrl}/stream)`
                 : 'LUMI Robot Video'}

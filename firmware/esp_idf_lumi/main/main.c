@@ -191,8 +191,8 @@ static esp_err_t init_camera(void) {
         .ledc_timer = LEDC_TIMER_3,
         .ledc_channel = LEDC_CHANNEL_7,
         .pixel_format = PIXFORMAT_JPEG,
-        .frame_size = FRAMESIZE_VGA, // 640x480
-        .jpeg_quality = 12,
+        .frame_size = FRAMESIZE_QVGA, // 320x240 for smooth, ultra-low latency worldwide streaming
+        .jpeg_quality = 14,
         .fb_count = 2,
         .grab_mode = CAMERA_GRAB_LATEST,
         .fb_location = CAMERA_FB_IN_PSRAM
@@ -217,6 +217,8 @@ static esp_err_t init_camera(void) {
 // 4B. CAMERA HTTP STREAM SERVER (MJPEG on port 81)
 // ==============================================================================
 
+static SemaphoreHandle_t s_camera_mutex = NULL;
+
 #define PART_BOUNDARY "123456789000000000000987654321"
 static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
 static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
@@ -232,43 +234,54 @@ static esp_err_t jpg_stream_httpd_handler(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
 
     while (true) {
-        fb = esp_camera_fb_get();
-        if (!fb) {
-            ESP_LOGE(TAG, "Camera capture failed");
-            res = ESP_FAIL;
-            break;
-        }
+        if (s_camera_mutex && xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            fb = esp_camera_fb_get();
+            if (!fb) {
+                xSemaphoreGive(s_camera_mutex);
+                ESP_LOGE(TAG, "Camera capture failed");
+                res = ESP_FAIL;
+                break;
+            }
 
-        if (res == ESP_OK) {
-            res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
+            if (res == ESP_OK) {
+                res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
+            }
+            if (res == ESP_OK) {
+                size_t hlen = snprintf(part_buf, sizeof(part_buf), _STREAM_PART, (unsigned int)fb->len);
+                res = httpd_resp_send_chunk(req, part_buf, hlen);
+            }
+            if (res == ESP_OK) {
+                res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+            }
+            esp_camera_fb_return(fb);
+            fb = NULL;
+            xSemaphoreGive(s_camera_mutex);
         }
-        if (res == ESP_OK) {
-            size_t hlen = snprintf(part_buf, sizeof(part_buf), _STREAM_PART, (unsigned int)fb->len);
-            res = httpd_resp_send_chunk(req, part_buf, hlen);
-        }
-        if (res == ESP_OK) {
-            res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
-        }
-        esp_camera_fb_return(fb);
-        fb = NULL;
         if (res != ESP_OK) break;
-        vTaskDelay(pdMS_TO_TICKS(40)); // ~25 FPS
+        vTaskDelay(pdMS_TO_TICKS(50)); // ~20 FPS
     }
     return res;
 }
 
 static esp_err_t jpg_snapshot_httpd_handler(httpd_req_t *req) {
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
+    camera_fb_t *fb = NULL;
+    if (s_camera_mutex && xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        fb = esp_camera_fb_get();
+        if (!fb) {
+            xSemaphoreGive(s_camera_mutex);
+            httpd_resp_send_500(req);
+            return ESP_FAIL;
+        }
+        httpd_resp_set_type(req, "image/jpeg");
+        httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+        esp_camera_fb_return(fb);
+        xSemaphoreGive(s_camera_mutex);
+        return res;
     }
-    httpd_resp_set_type(req, "image/jpeg");
-    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
-    esp_camera_fb_return(fb);
-    return res;
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
 }
 
 static httpd_handle_t start_camera_server(void) {
@@ -414,8 +427,48 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
     cJSON_Delete(json);
 }
 
+static bool s_room_connected = false;
+
 static void on_room_state_changed(livekit_connection_state_t state, void *ctx) {
     ESP_LOGI(TAG, "LiveKit Room state changed: %s", livekit_connection_state_str(state));
+    if (state == LIVEKIT_CONNECTION_STATE_CONNECTED) {
+        s_room_connected = true;
+        oled_set_paired(true);
+        oled_set_emotion_by_name("happy");
+    } else {
+        s_room_connected = false;
+    }
+}
+
+// Dedicated task for publishing camera frames worldwide over LiveKit WebRTC
+static void video_stream_task(void *pvParameters) {
+    livekit_room_handle_t *p_room = (livekit_room_handle_t *)pvParameters;
+    ESP_LOGI(TAG, "🎥 Worldwide LiveKit WebRTC Video Stream Task started on Core 1");
+    while (1) {
+        if (s_room_connected && p_room && *p_room) {
+            camera_fb_t *fb = NULL;
+            if (s_camera_mutex && xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                fb = esp_camera_fb_get();
+                if (fb) {
+                    livekit_data_payload_t payload = {
+                        .bytes = (uint8_t*)fb->buf,
+                        .size = fb->len
+                    };
+                    livekit_data_publish_options_t pub_opts = {
+                        .payload = &payload,
+                        .topic = "video",
+                        .lossy = true
+                    };
+                    livekit_room_publish_data(*p_room, &pub_opts);
+                    esp_camera_fb_return(fb);
+                }
+                xSemaphoreGive(s_camera_mutex);
+            }
+            vTaskDelay(pdMS_TO_TICKS(66)); // ~15 FPS smooth worldwide stream
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+    }
 }
 
 // ==============================================================================
@@ -430,10 +483,12 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
+    s_camera_mutex = xSemaphoreCreateMutex();
+
     // Initialize OLED Screen immediately so user gets instant visual feedback
     oled_init();
     oled_start_animation_task();
-    oled_show_pairing_screen("------");
+    oled_draw_eyes(1, 0); // Show friendly neutral eyes on boot
 
     // Initialize LiveKit SDK
     livekit_system_init();
@@ -536,6 +591,8 @@ void app_main(void) {
     if (lk_err == LIVEKIT_ERR_NONE) {
         livekit_room_connect(room_handle, livekit_url, livekit_token);
         ESP_LOGI(TAG, "Robot live! Connected to LiveKit Cloud WebRTC room!");
+        // Launch worldwide camera streaming task on Core 1
+        xTaskCreatePinnedToCore(video_stream_task, "lk_vid_task", 8192, &room_handle, 5, NULL, 1);
     } else {
         ESP_LOGE(TAG, "Failed to create LiveKit room object, error: %d", lk_err);
     }
@@ -545,7 +602,7 @@ void app_main(void) {
     snprintf(hb_url, sizeof(hb_url), "%s/functions/v1/robot-heartbeat", SUPABASE_BASE_URL);
     char hb_body[320];
     snprintf(hb_body, sizeof(hb_body), 
-             "{\"lumi_id\":\"%s\",\"device_secret\":\"%s\",\"battery_percent\":90,\"wifi_signal\":4,\"ip\":\"%s\"}", 
+             "{\"lumi_id\":\"%s\",\"device_secret\":\"%s\",\"battery_percent\":90,\"wifi_signal\":4,\"local_ip\":\"%s\"}", 
              LUMI_ID, DEVICE_SECRET, s_robot_ip);
 
     while (1) {

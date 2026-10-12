@@ -31,6 +31,29 @@ let currentConnectionState: ConnectionState = 'idle';
 let currentVideoTrack: RemoteTrack | null = null;
 const videoTrackListeners = new Set<(track: RemoteTrack | null) => void>();
 
+const cloudVideoListeners = new Set<(uri: string | null) => void>();
+let latestCloudVideoUri: string | null = null;
+
+const B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let result = '';
+  const len = bytes.byteLength;
+  let i = 0;
+  while (i < len) {
+    const b0 = bytes[i++];
+    const b1 = i < len ? bytes[i++] : NaN;
+    const b2 = i < len ? bytes[i++] : NaN;
+
+    const n = (b0 << 16) | (isNaN(b1) ? 0 : b1 << 8) | (isNaN(b2) ? 0 : b2);
+
+    result += B64_CHARS[(n >> 18) & 63];
+    result += B64_CHARS[(n >> 12) & 63];
+    result += isNaN(b1) ? '=' : B64_CHARS[(n >> 6) & 63];
+    result += isNaN(b2) ? '=' : B64_CHARS[n & 63];
+  }
+  return result;
+}
+
 function notifyVideoTrackListeners(track: RemoteTrack | null) {
   currentVideoTrack = track;
   videoTrackListeners.forEach((listener) => {
@@ -38,6 +61,17 @@ function notifyVideoTrackListeners(track: RemoteTrack | null) {
       listener(track);
     } catch (e) {
       console.warn('[LiveKit] Error in video track listener:', e);
+    }
+  });
+}
+
+function notifyCloudVideoFrame(uri: string | null) {
+  latestCloudVideoUri = uri;
+  cloudVideoListeners.forEach((listener) => {
+    try {
+      listener(uri);
+    } catch (e) {
+      console.warn('[LiveKit] Error in cloud video listener:', e);
     }
   });
 }
@@ -50,6 +84,16 @@ export function subscribeToRobotVideoTrack(
   listener(currentVideoTrack);
   return () => {
     videoTrackListeners.delete(listener);
+  };
+}
+
+export function subscribeToCloudVideoFrame(
+  listener: (uri: string | null) => void
+): () => void {
+  cloudVideoListeners.add(listener);
+  listener(latestCloudVideoUri);
+  return () => {
+    cloudVideoListeners.delete(listener);
   };
 }
 
@@ -136,6 +180,7 @@ export const livekitLiveService: LiveService = {
         currentConnectionState = 'ended';
         activeCallbacks?.onConnectionStateChange('ended');
         notifyVideoTrackListeners(null);
+        notifyCloudVideoFrame(null);
       });
 
       room.on(RoomEvent.ConnectionQualityChanged, (quality: ConnectionQuality) => {
@@ -176,7 +221,7 @@ export const livekitLiveService: LiveService = {
         }
       );
 
-      // Data Channel: telemetry from robot
+      // Data Channel: video stream and telemetry from robot
       room.on(
         RoomEvent.DataReceived,
         (
@@ -185,6 +230,15 @@ export const livekitLiveService: LiveService = {
           kind?: any,
           topic?: string
         ) => {
+          // 1. Worldwide LiveKit WebRTC Video Frame (topic 'video' or raw JPEG header)
+          if (topic === 'video' || (payload.length > 4 && payload[0] === 0xFF && payload[1] === 0xD8)) {
+            const base64 = uint8ArrayToBase64(payload);
+            const frameUri = `data:image/jpeg;base64,${base64}`;
+            notifyCloudVideoFrame(frameUri);
+            return;
+          }
+
+          // 2. Real-time Telemetry
           try {
             const decoder = new TextDecoder();
             const text = decoder.decode(payload);
@@ -197,6 +251,9 @@ export const livekitLiveService: LiveService = {
                 latencyMs: data.latencyMs ?? 50,
                 currentEmotion: data.currentEmotion ?? data.emotion,
               };
+              if (data.ip) {
+                (telemetry as any).ip = data.ip;
+              }
               activeCallbacks?.onTelemetry(telemetry);
             }
           } catch {
