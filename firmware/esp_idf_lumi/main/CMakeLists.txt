@@ -17,6 +17,7 @@ idf_component_register(
         mbedtls
         esp_codec_dev
         esp_audio_codec
+        esp_lcd
         av_render
 )
 
