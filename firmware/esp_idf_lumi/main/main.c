@@ -27,6 +27,14 @@
 #include "cJSON.h"
 #include "esp_camera.h"
 #include "driver/ledc.h"
+#include "driver/i2s_std.h"
+#include <math.h>
+
+// Audio Codec & AV Render
+#include "esp_codec_dev.h"
+#include "dummy_codec.h"
+#include "av_render_default.h"
+#include "esp_audio_dec_default.h"
 
 // LiveKit SDK
 #include "livekit.h"
@@ -49,7 +57,7 @@ static const char *TAG = "LUMI_ROBOT";
 // 2. HARDWARE PINS (From LUMI_Connection_Table.pdf)
 // ==============================================================================
 
-// Motor Driver Pins
+// Motor Driver Pins (L298N)
 #define MOTOR_LEFT_IN1      38
 #define MOTOR_LEFT_IN2      39
 #define MOTOR_RIGHT_IN3     40
@@ -61,6 +69,11 @@ static const char *TAG = "LUMI_ROBOT";
 #define LEDC_CH_IN2         LEDC_CHANNEL_1
 #define LEDC_CH_IN3         LEDC_CHANNEL_2
 #define LEDC_CH_IN4         LEDC_CHANNEL_3
+
+// Speaker Amplifier Pins (MAX98357A I2S Class-D Amp)
+#define AMP_I2S_BCLK_PIN    41
+#define AMP_I2S_LRC_PIN     42
+#define AMP_I2S_DIN_PIN     14
 
 // Camera Pins (GOOUUU ESP32-S3-CAM Built-In OV3660)
 #define CAM_PIN_PWDN        -1
@@ -163,6 +176,129 @@ static void apply_differential_drive(float x, float y) {
     ledc_update_duty(LEDC_MODE, LEDC_CH_IN2);
     ledc_update_duty(LEDC_MODE, LEDC_CH_IN3);
     ledc_update_duty(LEDC_MODE, LEDC_CH_IN4);
+}
+
+// ==============================================================================
+// 3B. SPEAKER & I2S AUDIO CONTROLLER (MAX98357A)
+// ==============================================================================
+
+static i2s_chan_handle_t s_i2s_tx_handle = NULL;
+static av_render_handle_t s_av_renderer = NULL;
+
+static void play_tone(uint32_t freq_hz, uint32_t duration_ms) {
+    if (!s_i2s_tx_handle) return;
+    int samples_count = (16000 * duration_ms) / 1000;
+    int16_t *buf = malloc(samples_count * 2 * sizeof(int16_t));
+    if (!buf) return;
+
+    for (int i = 0; i < samples_count; i++) {
+        float sample = sinf(2.0f * (float)M_PI * (float)freq_hz * ((float)i / 16000.0f));
+        int16_t val = (int16_t)(sample * 10000.0f);
+        buf[i * 2]     = val; // Left
+        buf[i * 2 + 1] = val; // Right
+    }
+
+    size_t written = 0;
+    i2s_channel_write(s_i2s_tx_handle, buf, samples_count * 2 * sizeof(int16_t), &written, pdMS_TO_TICKS(duration_ms + 100));
+    free(buf);
+}
+
+static void play_robot_greeting_chime(void) {
+    ESP_LOGI(TAG, "🎵 Playing robot boot chime through MAX98357A speaker...");
+    play_tone(523, 100);
+    vTaskDelay(pdMS_TO_TICKS(30));
+    play_tone(659, 100);
+    vTaskDelay(pdMS_TO_TICKS(30));
+    play_tone(784, 180);
+}
+
+static esp_err_t init_speaker_audio(void) {
+    ESP_LOGI(TAG, "Initializing MAX98357A I2S Audio Speaker (BCLK: 41, LRC: 42, DIN: 14)...");
+
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    chan_cfg.auto_clear = true;
+    esp_err_t err = i2s_new_channel(&chan_cfg, &s_i2s_tx_handle, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create I2S TX channel: 0x%x", err);
+        return err;
+    }
+
+    i2s_std_config_t std_cfg = {
+        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(16000),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(16, I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = (gpio_num_t)AMP_I2S_BCLK_PIN,
+            .ws   = (gpio_num_t)AMP_I2S_LRC_PIN,
+            .dout = (gpio_num_t)AMP_I2S_DIN_PIN,
+            .din  = I2S_GPIO_UNUSED,
+        },
+    };
+    err = i2s_channel_init_std_mode(s_i2s_tx_handle, &std_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init I2S std mode: 0x%x", err);
+        return err;
+    }
+
+    err = i2s_channel_enable(s_i2s_tx_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable I2S TX channel: 0x%x", err);
+        return err;
+    }
+
+    // Play pleasant greeting chime so client verifies speaker hardware on boot
+    play_robot_greeting_chime();
+
+    // Register audio decoders (Opus, G711) for LiveKit WebRTC audio stream
+    esp_audio_dec_register_default();
+
+    // Wrap I2S handle into esp_codec_dev via dummy_codec for LiveKit AV renderer
+    dummy_codec_cfg_t dummy_cfg = {
+        .pa_pin = -1,
+    };
+    const audio_codec_if_t *codec = dummy_codec_new(&dummy_cfg);
+
+    audio_codec_i2s_cfg_t i2s_cfg = {
+        .port = I2S_NUM_0,
+        .tx_handle = s_i2s_tx_handle,
+        .rx_handle = NULL,
+    };
+    const audio_codec_data_if_t *data = audio_codec_new_i2s_data(&i2s_cfg);
+
+    esp_codec_dev_cfg_t dev_cfg = {
+        .codec_if = codec,
+        .data_if  = data,
+        .dev_type = ESP_CODEC_DEV_TYPE_OUT,
+    };
+    esp_codec_dev_handle_t play_dev = esp_codec_dev_new(&dev_cfg);
+    if (!play_dev) {
+        ESP_LOGW(TAG, "Warning: esp_codec_dev_new returned NULL");
+        return ESP_OK;
+    }
+
+    i2s_render_cfg_t i2s_render_cfg = {
+        .play_handle = play_dev,
+    };
+    audio_render_handle_t audio_renderer = av_render_alloc_i2s_render(&i2s_render_cfg);
+
+    av_render_cfg_t render_cfg = {
+        .audio_render = audio_renderer,
+        .audio_raw_fifo_size = 8 * 4096,
+        .audio_render_fifo_size = 100 * 1024,
+        .allow_drop_data = false,
+    };
+    s_av_renderer = av_render_open(&render_cfg);
+    if (s_av_renderer) {
+        av_render_audio_frame_info_t frame_info = {
+            .sample_rate = 16000,
+            .channel = 2,
+            .bits_per_sample = 16,
+        };
+        av_render_set_fixed_frame_info(s_av_renderer, &frame_info);
+        ESP_LOGI(TAG, "LiveKit WebRTC Audio Renderer opened successfully!");
+    }
+
+    return ESP_OK;
 }
 
 // ==============================================================================
@@ -421,6 +557,16 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
             if (name && name->valuestring) {
                 ESP_LOGI(TAG, "Emote Triggered: %s", name->valuestring);
                 oled_set_emotion_by_name(name->valuestring);
+                if (strcmp(name->valuestring, "happy") == 0) {
+                    play_tone(659, 80);
+                    play_tone(880, 120);
+                } else if (strcmp(name->valuestring, "love") == 0) {
+                    play_tone(523, 100);
+                    play_tone(659, 100);
+                } else if (strcmp(name->valuestring, "excited") == 0) {
+                    play_tone(784, 80);
+                    play_tone(1046, 120);
+                }
             }
         }
     }
@@ -502,6 +648,7 @@ void app_main(void) {
 
     init_camera();
     init_motors();
+    init_speaker_audio();
     init_wifi();
 
     ESP_LOGI(TAG, "Waiting for Wi-Fi connection...");
@@ -578,14 +725,15 @@ void app_main(void) {
 
     ESP_LOGI(TAG, "Connecting to LiveKit Room at %s...", s_livekit_url);
 
-    // 3. Connect LiveKit Room & Publish Camera Video
+    // 3. Connect LiveKit Room & Publish Camera Video & Play Remote Audio
     s_room_handle = NULL;
     livekit_room_options_t room_options = {
         .publish = {
             .kind = LIVEKIT_MEDIA_TYPE_NONE,
         },
         .subscribe = {
-            .kind = LIVEKIT_MEDIA_TYPE_NONE,
+            .kind = s_av_renderer != NULL ? LIVEKIT_MEDIA_TYPE_AUDIO : LIVEKIT_MEDIA_TYPE_NONE,
+            .renderer = s_av_renderer,
         },
         .on_data_received = on_data_received,
         .on_state_changed = on_room_state_changed,

@@ -2,3 +2,4 @@ dependencies:
   livekit/livekit: "^0.3.11"
   espressif/esp32-camera: "^2.0.0"
   espressif/esp_cam_sensor: "^2.6.0"
+  espressif/esp_codec_dev: "~1.4"
