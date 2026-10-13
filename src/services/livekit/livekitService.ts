@@ -111,8 +111,83 @@ export async function setRobotMicrophone(_enabled: boolean): Promise<void> {
   // Walkie-Talkie Push-to-Talk (PTT) is handled strictly over reliable Data Channel ('mic_start'/'mic_stop').
 }
 
+interface CachedToken {
+  token: string;
+  url: string;
+  robotId: string;
+  expiresAt: number;
+}
+
+let cachedSessionToken: CachedToken | null = null;
+let isIntentionalDisconnect = false;
+
+async function fetchLiveKitCredentialsWithRetry(
+  robotId: string,
+  maxRetries = 3
+): Promise<{ token: string; url: string }> {
+  // 1. Check valid in-memory cache first (valid for 90m) to instantly bypass cold starts and transient 503s
+  if (
+    cachedSessionToken &&
+    cachedSessionToken.robotId === robotId &&
+    Date.now() < cachedSessionToken.expiresAt
+  ) {
+    console.log('[LiveKit] Using valid cached session token for robot:', robotId);
+    return { token: cachedSessionToken.token, url: cachedSessionToken.url };
+  }
+
+  let lastError: any = null;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[LiveKit] Requesting user-token from Edge Function (attempt ${attempt}/${maxRetries})...`);
+      const { data, error } = await supabase.functions.invoke('user-token', {
+        body: { robot_id: robotId },
+      });
+
+      if (!error && data?.token && data?.url) {
+        // Cache token (Edge function default is 2 hours; cache for 90m to be safe)
+        const ttlMs = (data.expires_in ? Number(data.expires_in) - 300 : 5400) * 1000;
+        cachedSessionToken = {
+          token: data.token,
+          url: data.url,
+          robotId,
+          expiresAt: Date.now() + Math.max(ttlMs, 60000),
+        };
+        return { token: data.token, url: data.url };
+      }
+
+      lastError = error;
+      console.warn(`[LiveKit] user-token attempt ${attempt} failed:`, error?.message);
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`[LiveKit] user-token network attempt ${attempt} error:`, err?.message);
+    }
+
+    if (attempt < maxRetries) {
+      // Exponential backoff: 800ms, 1600ms
+      await new Promise((res) => setTimeout(res, 800 * attempt));
+    }
+  }
+
+  // If all retries fail, parse readable error message
+  let msg = lastError?.message || 'Failed to authenticate live session';
+  try {
+    if (
+      lastError &&
+      'context' in lastError &&
+      lastError.context &&
+      typeof lastError.context.json === 'function'
+    ) {
+      const parsed = await lastError.context.json();
+      if (parsed?.error) msg = parsed.error;
+    }
+  } catch {}
+  throw new Error(msg);
+}
+
 export const livekitLiveService: LiveService = {
   async connect(robotId: string, callbacks: LiveSessionCallbacks): Promise<void> {
+    isIntentionalDisconnect = false;
+
     // 1. If already connected to the same robot with a healthy active room, reuse active session seamlessly
     if (
       activeRoom &&
@@ -135,6 +210,7 @@ export const livekitLiveService: LiveService = {
     // 2. If an existing or stale room exists, cleanly disconnect first
     if (activeRoom) {
       await this.disconnect();
+      isIntentionalDisconnect = false;
     }
 
     activeRobotId = robotId;
@@ -143,29 +219,18 @@ export const livekitLiveService: LiveService = {
     callbacks.onConnectionStateChange('connecting');
 
     try {
-      // 1. Request signed LiveKit token from Supabase Edge Function
-      const { data, error } = await supabase.functions.invoke('user-token', {
-        body: { robot_id: robotId },
-      });
-
-      if (error) {
-        let msg = error.message || 'Failed to authenticate live session';
-        try {
-          if ('context' in error && (error as any).context && typeof (error as any).context.json === 'function') {
-            const parsed = await (error as any).context.json();
-            if (parsed?.error) msg = parsed.error;
-          }
-        } catch {}
+      // 1. Request signed LiveKit token with auto-retry and cache
+      let creds: { token: string; url: string };
+      try {
+        creds = await fetchLiveKitCredentialsWithRetry(robotId, 3);
+      } catch (err: any) {
         currentConnectionState = 'ended';
         callbacks.onConnectionStateChange('ended');
-        callbacks.onError(msg);
+        callbacks.onError(err.message || 'Cloud Connection Error');
         return;
       }
 
-      const { token, url } = data;
-      if (!token || !url) {
-        throw new Error('LiveKit room connection credentials missing.');
-      }
+      const { token, url } = creds;
 
       // 2. Start native audio session
       try {
@@ -198,15 +263,30 @@ export const livekitLiveService: LiveService = {
       });
 
       room.on(RoomEvent.Disconnected, () => {
-        currentConnectionState = 'ended';
-        activeRobotId = null;
-        activeRoom = null;
-        activeCallbacks?.onConnectionStateChange('ended');
-        activeCallbacks = null;
+        console.log('[LiveKit] Room disconnected. Intentional:', isIntentionalDisconnect);
         notifyVideoTrackListeners(null);
         notifyCloudVideoFrame(null);
         currentVideoTrack = null;
         latestCloudVideoUri = null;
+
+        if (!isIntentionalDisconnect && activeRobotId === robotId) {
+          console.log('[LiveKit] Connection dropped unexpectedly. Attempting auto-reconnect...');
+          currentConnectionState = 'reconnecting';
+          callbacks.onConnectionStateChange('reconnecting');
+          setTimeout(() => {
+            if (!isIntentionalDisconnect && activeRobotId === robotId) {
+              livekitLiveService.connect(robotId, callbacks).catch((err) => {
+                console.warn('[LiveKit] Auto-reconnect failed:', err);
+              });
+            }
+          }, 1500);
+        } else {
+          currentConnectionState = 'ended';
+          activeRobotId = null;
+          activeRoom = null;
+          activeCallbacks?.onConnectionStateChange('ended');
+          activeCallbacks = null;
+        }
       });
 
       room.on(RoomEvent.ConnectionQualityChanged, (quality: ConnectionQuality) => {
@@ -312,6 +392,7 @@ export const livekitLiveService: LiveService = {
   },
 
   async disconnect(): Promise<void> {
+    isIntentionalDisconnect = true;
     currentConnectionState = 'ended';
     activeRobotId = null;
     if (activeCallbacks) {
@@ -356,11 +437,16 @@ export const livekitControlChannel: ControlChannel = {
     try {
       const encoder = new TextEncoder();
       const payload = encoder.encode(JSON.stringify(message));
-      // Always publish reliably to guarantee drive, stop, and control commands are not dropped
-      activeRoom.localParticipant.publishData(payload, {
-        reliable: true,
-        topic: message.t,
-      });
+      // Use lossy for high-frequency drive updates, reliable for discrete commands
+      const reliable = message.t !== 'drive';
+      activeRoom.localParticipant
+        .publishData(payload, {
+          reliable,
+          topic: message.t,
+        })
+        .catch((err) => {
+          console.warn(`[LiveKit] Failed to publish ${message.t}:`, err);
+        });
     } catch (err) {
       console.warn('[LiveKit] Error sending control packet:', err);
     }
@@ -371,6 +457,7 @@ export const livekitControlChannel: ControlChannel = {
   },
 
   stopDriving(): void {
+    this.send({ t: 'drive', x: 0, y: 0 });
     this.send({ t: 'stop' });
   },
 
@@ -395,10 +482,14 @@ export const livekitControlChannel: ControlChannel = {
       return;
     }
     try {
-      activeRoom.localParticipant.publishData(bytes as any, {
-        reliable: true,
-        topic: 'voice',
-      });
+      activeRoom.localParticipant
+        .publishData(bytes as any, {
+          reliable: false, // Lossy UDP stream for low-latency live PCM audio
+          topic: 'voice_stream',
+        })
+        .catch((err) => {
+          console.warn('[LiveKit] Error sending voice packet:', err);
+        });
     } catch (err) {
       console.warn('[LiveKit] Error sending voice packet:', err);
     }

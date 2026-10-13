@@ -111,6 +111,8 @@ static void ws2812_turn_off_gpio48(void) {
     esp_rom_delay_us(350);
 }
 
+static void motor_watchdog_task(void *pvParameters);
+
 static void init_motors(void) {
     // Extinguish the blinding onboard WS2812 LED on boot
     ws2812_turn_off_gpio48();
@@ -140,9 +142,14 @@ static void init_motors(void) {
         ledc_channel_config(&ch_conf);
     }
     ESP_LOGI(TAG, "Motors initialized on GPIO 38, 39, 40, 48.");
+    xTaskCreate(motor_watchdog_task, "motor_wdg", 2048, NULL, 3, NULL);
 }
 
+static uint32_t s_last_drive_ms = 0;
+static bool s_motors_active = false;
+
 static void stop_motors(void) {
+    s_motors_active = false;
     ledc_set_duty(LEDC_MODE, LEDC_CH_IN1, 0);
     ledc_update_duty(LEDC_MODE, LEDC_CH_IN1);
     ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, 0);
@@ -153,7 +160,28 @@ static void stop_motors(void) {
     ledc_update_duty(LEDC_MODE, LEDC_CH_IN4);
 }
 
+static void motor_watchdog_task(void *pvParameters) {
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(150));
+        if (s_motors_active) {
+            uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            if (now - s_last_drive_ms > 800) {
+                stop_motors();
+                ESP_LOGW(TAG, "⏱️ Motor watchdog: auto-stopped motors after 800ms silence");
+            }
+        }
+    }
+}
+
 static void apply_differential_drive(float x, float y) {
+    if (fabsf(x) < 0.05f && fabsf(y) < 0.05f) {
+        stop_motors();
+        return;
+    }
+
+    s_last_drive_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    s_motors_active = true;
+
     float left = y + x;
     float right = y - x;
 
@@ -162,14 +190,34 @@ static void apply_differential_drive(float x, float y) {
     if (right > 1.0f) right = 1.0f;
     if (right < -1.0f) right = -1.0f;
 
-    int left_pwm = (int)(fabs(left) * 255.0f);
-    int right_pwm = (int)(fabs(right) * 255.0f);
+    // L298N has ~1.8V internal drop across bipolar transistors.
+    // On 5V supply, hobby DC gear motors stall below ~120 PWM duty.
+    // Scale active duty from MIN_PWM (120) to MAX_PWM (255).
+    const int MIN_PWM = 120;
+    const int MAX_PWM = 255;
 
-    // Left motor direction
-    if (left > 0) {
+    int left_pwm = 0;
+    if (fabsf(left) >= 0.05f) {
+        left_pwm = MIN_PWM + (int)(fabsf(left) * (MAX_PWM - MIN_PWM));
+        if (left_pwm > 255) left_pwm = 255;
+    }
+
+    int right_pwm = 0;
+    if (fabsf(right) >= 0.05f) {
+        right_pwm = MIN_PWM + (int)(fabsf(right) * (MAX_PWM - MIN_PWM));
+        if (right_pwm > 255) right_pwm = 255;
+    }
+
+    ESP_LOGI(TAG, "🕹️ Drive: x=%.2f, y=%.2f | L=%d (%s), R=%d (%s)",
+             x, y,
+             left_pwm, left >= 0 ? "FWD" : "REV",
+             right_pwm, right >= 0 ? "FWD" : "REV");
+
+    // Left motor direction (IN1 / IN2)
+    if (left > 0.05f) {
         ledc_set_duty(LEDC_MODE, LEDC_CH_IN1, left_pwm);
         ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, 0);
-    } else if (left < 0) {
+    } else if (left < -0.05f) {
         ledc_set_duty(LEDC_MODE, LEDC_CH_IN1, 0);
         ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, left_pwm);
     } else {
@@ -177,11 +225,11 @@ static void apply_differential_drive(float x, float y) {
         ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, 0);
     }
 
-    // Right motor direction
-    if (right > 0) {
+    // Right motor direction (IN3 / IN4)
+    if (right > 0.05f) {
         ledc_set_duty(LEDC_MODE, LEDC_CH_IN3, right_pwm);
         ledc_set_duty(LEDC_MODE, LEDC_CH_IN4, 0);
-    } else if (right < 0) {
+    } else if (right < -0.05f) {
         ledc_set_duty(LEDC_MODE, LEDC_CH_IN3, 0);
         ledc_set_duty(LEDC_MODE, LEDC_CH_IN4, right_pwm);
     } else {
@@ -510,17 +558,47 @@ static char* http_post_json(const char *url, const char *json_body) {
 static void on_data_received(const livekit_data_received_t *data, void *ctx) {
     if (!data || !data->payload.bytes || data->payload.size == 0) return;
 
-    // 1. Direct binary audio stream over WebRTC data channel (topic "voice")
-    if (data->topic && strcmp(data->topic, "voice") == 0) {
-        if (s_i2s_tx_handle && data->payload.size > 0) {
-            size_t written = 0;
-            i2s_channel_write(s_i2s_tx_handle, data->payload.bytes, data->payload.size, &written, pdMS_TO_TICKS(100));
+    // 1. Direct binary audio stream over WebRTC data channel (topic "voice_stream" or "voice")
+    // Safeguard: Never write JSON string data {"... directly to I2S DAC DMA (causes static)!
+    if (data->topic && (strcmp(data->topic, "voice_stream") == 0 || strcmp(data->topic, "voice") == 0)) {
+        if (data->payload.size > 0 && data->payload.bytes[0] != '{') {
+            if (s_i2s_tx_handle) {
+                // Incoming phone stream is 16-bit 16kHz mono PCM.
+                // Duplicate mono into stereo (Left + Right) for MAX98357A I2S DAC with digital gain boost.
+                size_t mono_samples = data->payload.size / sizeof(int16_t);
+                if (mono_samples > 0) {
+                    int16_t *stereo_buf = malloc(mono_samples * 2 * sizeof(int16_t));
+                    if (stereo_buf) {
+                        const int16_t *mono_ptr = (const int16_t *)data->payload.bytes;
+                        for (size_t i = 0; i < mono_samples; i++) {
+                            int32_t boosted = (int32_t)mono_ptr[i] * 2; // +6dB gain boost for walkie-talkie projection
+                            if (boosted > 32767) boosted = 32767;
+                            if (boosted < -32768) boosted = -32768;
+                            int16_t sample = (int16_t)boosted;
+                            stereo_buf[i * 2]     = sample;
+                            stereo_buf[i * 2 + 1] = sample;
+                        }
+                        size_t written = 0;
+                        i2s_channel_write(s_i2s_tx_handle, stereo_buf, mono_samples * 2 * sizeof(int16_t), &written, pdMS_TO_TICKS(100));
+                        free(stereo_buf);
+                    }
+                }
+            }
+            return;
         }
-        return;
     }
 
+    ESP_LOGI(TAG, "📥 Recv packet topic=%s len=%d: %.*s",
+             data->topic ? data->topic : "NULL",
+             (int)data->payload.size,
+             (int)(data->payload.size > 60 ? 60 : data->payload.size),
+             (const char*)data->payload.bytes);
+
     cJSON *json = cJSON_ParseWithLength((const char *)data->payload.bytes, data->payload.size);
-    if (!json) return;
+    if (!json) {
+        ESP_LOGW(TAG, "Payload could not be parsed as JSON (size %d)", (int)data->payload.size);
+        return;
+    }
 
     cJSON *t = cJSON_GetObjectItem(json, "t");
     if (t && t->valuestring) {
@@ -530,7 +608,6 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
             if (x_item && y_item) {
                 float x = (float)x_item->valuedouble;
                 float y = (float)y_item->valuedouble;
-                ESP_LOGI(TAG, "🕹️ Drive Command: x=%.2f, y=%.2f", x, y);
                 apply_differential_drive(x, y);
             }
         } else if (strcmp(t->valuestring, "stop") == 0) {
@@ -558,8 +635,32 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
                 unsigned char *out_buf = malloc(b64_len);
                 if (out_buf) {
                     if (mbedtls_base64_decode(out_buf, b64_len, &out_len, (const unsigned char *)b64_item->valuestring, b64_len) == 0 && out_len > 0) {
-                        size_t written = 0;
-                        i2s_channel_write(s_i2s_tx_handle, out_buf, out_len, &written, pdMS_TO_TICKS(200));
+                        // Check for WAV RIFF header
+                        size_t offset = 0;
+                        if (out_len > 44 && memcmp(out_buf, "RIFF", 4) == 0) {
+                            for (size_t i = 12; i < out_len - 8; i++) {
+                                if (memcmp(out_buf + i, "data", 4) == 0) {
+                                    offset = i + 8;
+                                    break;
+                                }
+                            }
+                            if (offset == 0) offset = 44;
+                        }
+                        size_t pcm_len = out_len > offset ? out_len - offset : 0;
+                        if (pcm_len > 0) {
+                            size_t mono_samples = pcm_len / sizeof(int16_t);
+                            int16_t *stereo_buf = malloc(mono_samples * 2 * sizeof(int16_t));
+                            if (stereo_buf) {
+                                const int16_t *mono_ptr = (const int16_t *)(out_buf + offset);
+                                for (size_t i = 0; i < mono_samples; i++) {
+                                    stereo_buf[i * 2]     = mono_ptr[i];
+                                    stereo_buf[i * 2 + 1] = mono_ptr[i];
+                                }
+                                size_t written = 0;
+                                i2s_channel_write(s_i2s_tx_handle, stereo_buf, mono_samples * 2 * sizeof(int16_t), &written, pdMS_TO_TICKS(200));
+                                free(stereo_buf);
+                            }
+                        }
                     }
                     free(out_buf);
                 }
@@ -761,14 +862,14 @@ void app_main(void) {
              "{\"lumi_id\":\"%s\",\"device_secret\":\"%s\",\"battery_percent\":90,\"wifi_signal\":4,\"local_ip\":\"%s\"}", 
              LUMI_ID, DEVICE_SECRET, s_robot_ip);
 
+    int hb_ticks = 0;
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(30000));
-        char *hb_res = http_post_json(hb_url, hb_body);
-        if (hb_res) free(hb_res);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        hb_ticks++;
 
-        // Auto-reconnect if LiveKit room connection was lost or dropped
-        if (!s_room_connected && s_room_handle != NULL && strlen(s_livekit_token) > 0) {
-            ESP_LOGW(TAG, "LiveKit room disconnected. Attempting auto-reconnect...");
+        // Fast auto-reconnect if LiveKit room connection was lost or dropped (checks every 2 seconds)
+        if (!s_room_connected && s_room_handle != NULL && strlen(s_livekit_token) > 0 && (hb_ticks % 2 == 0)) {
+            ESP_LOGW(TAG, "LiveKit room disconnected. Attempting fast auto-reconnect...");
             livekit_err_t rec_err = livekit_room_connect(s_room_handle, s_livekit_url, s_livekit_token);
             if (rec_err != LIVEKIT_ERR_NONE) {
                 ESP_LOGE(TAG, "LiveKit reconnect failed: %d. Refreshing token...", rec_err);
@@ -788,6 +889,13 @@ void app_main(void) {
                     free(new_res);
                 }
             }
+        }
+
+        // Send Supabase heartbeat every 30 seconds
+        if (hb_ticks >= 30) {
+            hb_ticks = 0;
+            char *hb_res = http_post_json(hb_url, hb_body);
+            if (hb_res) free(hb_res);
         }
 
         // Also publish real-time telemetry over WebRTC Data Channel if connected

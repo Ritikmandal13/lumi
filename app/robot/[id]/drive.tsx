@@ -22,9 +22,8 @@ import {
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import {
-  useAudioRecorder,
+  useAudioStream,
   AudioModule,
-  RecordingPresets,
   setAudioModeAsync,
 } from 'expo-audio';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -253,8 +252,25 @@ export default function DriveScreen() {
   const [isTalking, setIsTalking] = useState(false);
   const [isMicLocked, setIsMicLocked] = useState(false);
 
-  // Audio Recorder for Walkie-Talkie Voice Clips
-  const audioRecorder = useAudioRecorder(RecordingPresets.LOW_QUALITY);
+  // Real-time 16kHz 16-bit PCM Microphone Audio Stream for Walkie-Talkie
+  const { stream: audioStream } = useAudioStream({
+    sampleRate: 16000,
+    channels: 1,
+    encoding: 'int16',
+    onBuffer: (buffer) => {
+      if (buffer?.data) {
+        controlChannel.sendVoiceBytes(new Uint8Array(buffer.data));
+      }
+    },
+  });
+
+  useEffect(() => {
+    return () => {
+      try {
+        audioStream.stop();
+      } catch {}
+    };
+  }, [audioStream]);
 
   // LiveKit Remote Video Track
   const [videoTrack, setVideoTrack] = useState<any>(null);
@@ -340,45 +356,38 @@ export default function DriveScreen() {
     return true;
   };
 
-  const handleStartTalking = async () => {
-    if (isMicLocked) return;
+  const startAudioCapture = async (): Promise<boolean> => {
     const ok = await ensureMicrophonePermission();
-    if (!ok) return;
+    if (!ok) return false;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     setIsTalking(true);
     try {
-      await audioRecorder.prepareToRecordAsync();
-      audioRecorder.record();
+      await audioStream.start();
+      return true;
     } catch (err) {
-      console.warn('[PTT] Start recording failed:', err);
+      console.warn('[PTT] Start audioStream failed:', err);
+      return false;
     }
   };
 
-  const handleStopTalking = async () => {
-    if (isMicLocked) return;
+  const stopAudioCapture = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     setIsTalking(false);
     try {
-      if (audioRecorder.isRecording) {
-        await audioRecorder.stop();
-        const uri = audioRecorder.uri;
-        if (uri) {
-          const resp = await fetch(uri);
-          const blob = await resp.blob();
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const res = reader.result as string;
-            const base64Data = res?.includes(',') ? res.split(',')[1] : res;
-            if (base64Data) {
-              controlChannel.sendVoice(base64Data);
-            }
-          };
-          reader.readAsDataURL(blob);
-        }
-      }
+      audioStream.stop();
     } catch (err) {
-      console.warn('[PTT] Stop recording/send failed:', err);
+      console.warn('[PTT] Stop audioStream failed:', err);
     }
+  };
+
+  const handleStartTalking = async () => {
+    if (isMicLocked) return;
+    await startAudioCapture();
+  };
+
+  const handleStopTalking = () => {
+    if (isMicLocked) return;
+    stopAudioCapture();
   };
 
   // Actions Drawer
@@ -435,13 +444,13 @@ export default function DriveScreen() {
           },
           onError: (err) => {
             if (mounted) {
-              showAlert('Cloud Connection Error', err, undefined, 'warning');
+              console.warn('[DriveScreen] Live stream connection warning:', err);
             }
           },
         });
       } catch (err: any) {
         if (mounted) {
-          showAlert('Connection Failed', err.message || 'Failed to connect to LUMI Cloud', undefined, 'danger');
+          console.warn('[DriveScreen] Init connection warning:', err);
         }
       }
     }
@@ -457,8 +466,46 @@ export default function DriveScreen() {
     };
   }, [id]);
 
-  // Handle Joystick PanResponder
-  const lastSentTime = useRef(0);
+  // Active speed multiplier ref to prevent stale closure in PanResponder
+  const speedMultiplierRef = useRef(speedMultiplier);
+  useEffect(() => {
+    speedMultiplierRef.current = speedMultiplier;
+  }, [speedMultiplier]);
+
+  // Active driving coordinates and heartbeat interval
+  const currentCoords = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const driveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startDriveLoop = useCallback(() => {
+    if (driveTimerRef.current) return;
+    driveTimerRef.current = setInterval(() => {
+      const { x, y } = currentCoords.current;
+      if (Math.abs(x) > 0.01 || Math.abs(y) > 0.01) {
+        controlChannel.startDriving(
+          Number((x * speedMultiplierRef.current).toFixed(2)),
+          Number((y * speedMultiplierRef.current).toFixed(2)),
+        );
+      }
+    }, 60);
+  }, []);
+
+  const stopDriveLoop = useCallback(() => {
+    if (driveTimerRef.current) {
+      clearInterval(driveTimerRef.current);
+      driveTimerRef.current = null;
+    }
+    currentCoords.current = { x: 0, y: 0 };
+    controlChannel.stopDriving();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (driveTimerRef.current) {
+        clearInterval(driveTimerRef.current);
+        driveTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const panResponder = useRef(
     PanResponder.create({
@@ -466,6 +513,33 @@ export default function DriveScreen() {
       onMoveShouldSetPanResponder: () => true,
       onStartShouldSetPanResponderCapture: () => true,
       onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: (_, gestureState) => {
+        const dx = gestureState.dx;
+        const dy = gestureState.dy;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        let clampedX = dx;
+        let clampedY = dy;
+
+        if (distance > MAX_DRAG) {
+          const ratio = MAX_DRAG / distance;
+          clampedX = dx * ratio;
+          clampedY = dy * ratio;
+        }
+
+        puckX.value = clampedX;
+        puckY.value = clampedY;
+
+        const normalizedX = Number((clampedX / MAX_DRAG).toFixed(2));
+        const normalizedY = Number((-clampedY / MAX_DRAG).toFixed(2));
+        currentCoords.current = { x: normalizedX, y: normalizedY };
+
+        controlChannel.startDriving(
+          Number((normalizedX * speedMultiplierRef.current).toFixed(2)),
+          Number((normalizedY * speedMultiplierRef.current).toFixed(2)),
+        );
+        startDriveLoop();
+      },
       onPanResponderMove: (_, gestureState) => {
         const dx = gestureState.dx;
         const dy = gestureState.dy;
@@ -483,23 +557,25 @@ export default function DriveScreen() {
         puckX.value = clampedX;
         puckY.value = clampedY;
 
-        // Throttle sending commands (every 50ms)
-        const now = Date.now();
-        if (now - lastSentTime.current > 50) {
-          lastSentTime.current = now;
-          const normalizedX = Number((clampedX / MAX_DRAG).toFixed(2));
-          // Invert Y so up is positive
-          const normalizedY = Number((-clampedY / MAX_DRAG).toFixed(2));
-          controlChannel.startDriving(
-            normalizedX * speedMultiplier,
-            normalizedY * speedMultiplier,
-          );
-        }
+        const normalizedX = Number((clampedX / MAX_DRAG).toFixed(2));
+        const normalizedY = Number((-clampedY / MAX_DRAG).toFixed(2));
+        currentCoords.current = { x: normalizedX, y: normalizedY };
+
+        controlChannel.startDriving(
+          Number((normalizedX * speedMultiplierRef.current).toFixed(2)),
+          Number((normalizedY * speedMultiplierRef.current).toFixed(2)),
+        );
+        startDriveLoop();
       },
       onPanResponderRelease: () => {
         puckX.value = withSpring(0, { damping: 15, stiffness: 200 });
         puckY.value = withSpring(0, { damping: 15, stiffness: 200 });
-        controlChannel.stopDriving();
+        stopDriveLoop();
+      },
+      onPanResponderTerminate: () => {
+        puckX.value = withSpring(0, { damping: 15, stiffness: 200 });
+        puckY.value = withSpring(0, { damping: 15, stiffness: 200 });
+        stopDriveLoop();
       },
     }),
   ).current;
@@ -824,13 +900,14 @@ export default function DriveScreen() {
               {/* Lock Toggle Button */}
               <Pressable
                 onPress={async () => {
-                  const nextLock = !isMicLocked;
-                  if (nextLock) {
-                    await handleStartTalking();
-                    setIsMicLocked(true);
+                  if (!isMicLocked) {
+                    const ok = await startAudioCapture();
+                    if (ok) {
+                      setIsMicLocked(true);
+                    }
                   } else {
                     setIsMicLocked(false);
-                    await handleStopTalking();
+                    stopAudioCapture();
                   }
                 }}
                 style={[
