@@ -113,13 +113,12 @@ export async function setRobotMicrophone(_enabled: boolean): Promise<void> {
 
 export const livekitLiveService: LiveService = {
   async connect(robotId: string, callbacks: LiveSessionCallbacks): Promise<void> {
-    // 1. If already connected to the same robot, reuse active room session seamlessly
+    // 1. If already connected to the same robot with a healthy active room, reuse active session seamlessly
     if (
       activeRoom &&
+      activeRoom.state === 'connected' &&
       activeRobotId === robotId &&
-      (currentConnectionState === 'connected' ||
-        currentConnectionState === 'weak' ||
-        currentConnectionState === 'connecting')
+      (currentConnectionState === 'connected' || currentConnectionState === 'weak')
     ) {
       console.log('[LiveKit] Reusing active session for robot:', robotId);
       activeCallbacks = callbacks;
@@ -133,7 +132,7 @@ export const livekitLiveService: LiveService = {
       return;
     }
 
-    // 2. If connected to a different robot, disconnect first
+    // 2. If an existing or stale room exists, cleanly disconnect first
     if (activeRoom) {
       await this.disconnect();
     }
@@ -203,8 +202,11 @@ export const livekitLiveService: LiveService = {
         activeRobotId = null;
         activeRoom = null;
         activeCallbacks?.onConnectionStateChange('ended');
+        activeCallbacks = null;
         notifyVideoTrackListeners(null);
         notifyCloudVideoFrame(null);
+        currentVideoTrack = null;
+        latestCloudVideoUri = null;
       });
 
       room.on(RoomEvent.ConnectionQualityChanged, (quality: ConnectionQuality) => {
@@ -318,14 +320,18 @@ export const livekitLiveService: LiveService = {
     }
 
     notifyVideoTrackListeners(null);
+    notifyCloudVideoFrame(null);
+    currentVideoTrack = null;
+    latestCloudVideoUri = null;
 
     if (activeRoom) {
+      const roomToDisconnect = activeRoom;
+      activeRoom = null;
       try {
-        await activeRoom.disconnect();
+        await roomToDisconnect.disconnect();
       } catch (err) {
         console.warn('[LiveKit] Error disconnecting room:', err);
       }
-      activeRoom = null;
     }
 
     try {
@@ -378,5 +384,23 @@ export const livekitControlChannel: ControlChannel = {
 
   setVolume(value: number): void {
     this.send({ t: 'volume', value });
+  },
+
+  sendVoice(base64Data: string): void {
+    this.send({ t: 'voice', data: base64Data });
+  },
+
+  sendVoiceBytes(bytes: Uint8Array): void {
+    if (!activeRoom || !activeRoom.localParticipant) {
+      return;
+    }
+    try {
+      activeRoom.localParticipant.publishData(bytes as any, {
+        reliable: true,
+        topic: 'voice',
+      });
+    } catch (err) {
+      console.warn('[LiveKit] Error sending voice packet:', err);
+    }
   },
 };

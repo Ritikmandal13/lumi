@@ -31,6 +31,7 @@
 #include "driver/gpio.h"
 #include "esp_rom_sys.h"
 #include <math.h>
+#include "mbedtls/base64.h"
 
 // LiveKit SDK
 #include "livekit.h"
@@ -314,8 +315,8 @@ static esp_err_t init_camera(void) {
 
     sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
-        s->set_vflip(s, 0);
-        s->set_hmirror(s, 0);
+        s->set_vflip(s, 1);    // 180° rotation
+        s->set_hmirror(s, 1);  // 180° rotation
     }
     ESP_LOGI(TAG, "OV3660 camera initialized successfully!");
     return ESP_OK;
@@ -508,6 +509,16 @@ static char* http_post_json(const char *url, const char *json_body) {
 
 static void on_data_received(const livekit_data_received_t *data, void *ctx) {
     if (!data || !data->payload.bytes || data->payload.size == 0) return;
+
+    // 1. Direct binary audio stream over WebRTC data channel (topic "voice")
+    if (data->topic && strcmp(data->topic, "voice") == 0) {
+        if (s_i2s_tx_handle && data->payload.size > 0) {
+            size_t written = 0;
+            i2s_channel_write(s_i2s_tx_handle, data->payload.bytes, data->payload.size, &written, pdMS_TO_TICKS(100));
+        }
+        return;
+    }
+
     cJSON *json = cJSON_ParseWithLength((const char *)data->payload.bytes, data->payload.size);
     if (!json) return;
 
@@ -526,27 +537,31 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
             stop_motors();
             ESP_LOGW(TAG, "🛑 EMERGENCY / JOYSTICK STOP EXECUTED");
         } else if (strcmp(t->valuestring, "mic_start") == 0) {
-            ESP_LOGI(TAG, "🎙️ Mic Push-to-Talk active!");
-            play_tone(1046, 80);
-            vTaskDelay(pdMS_TO_TICKS(20));
-            play_tone(1318, 100);
+            ESP_LOGI(TAG, "🎙️ Mic Push-to-Talk active (channel open, silent)");
+            // Silent channel opening - no radio chords
         } else if (strcmp(t->valuestring, "mic_stop") == 0) {
-            ESP_LOGI(TAG, "🎙️ Mic Push-to-Talk released.");
-            play_tone(880, 80);
+            ESP_LOGI(TAG, "🎙️ Mic Push-to-Talk released (channel closed, silent)");
+            // Silent channel closing - no radio chords
         } else if (strcmp(t->valuestring, "emotion") == 0) {
             cJSON *name = cJSON_GetObjectItem(json, "name");
             if (name && name->valuestring) {
-                ESP_LOGI(TAG, "Emote Triggered: %s", name->valuestring);
+                ESP_LOGI(TAG, "Emote Triggered (silent): %s", name->valuestring);
                 oled_set_emotion_by_name(name->valuestring);
-                if (strcmp(name->valuestring, "happy") == 0) {
-                    play_tone(659, 80);
-                    play_tone(880, 120);
-                } else if (strcmp(name->valuestring, "love") == 0) {
-                    play_tone(523, 100);
-                    play_tone(659, 100);
-                } else if (strcmp(name->valuestring, "excited") == 0) {
-                    play_tone(784, 80);
-                    play_tone(1046, 120);
+                // Silent emote: speaker tones removed so eyes animate silently!
+            }
+        } else if (strcmp(t->valuestring, "voice") == 0) {
+            // Decodes base64 PCM audio data sent from Walkie-Talkie voice clips
+            cJSON *b64_item = cJSON_GetObjectItem(json, "data");
+            if (b64_item && b64_item->valuestring && s_i2s_tx_handle) {
+                size_t b64_len = strlen(b64_item->valuestring);
+                size_t out_len = 0;
+                unsigned char *out_buf = malloc(b64_len);
+                if (out_buf) {
+                    if (mbedtls_base64_decode(out_buf, b64_len, &out_len, (const unsigned char *)b64_item->valuestring, b64_len) == 0 && out_len > 0) {
+                        size_t written = 0;
+                        i2s_channel_write(s_i2s_tx_handle, out_buf, out_len, &written, pdMS_TO_TICKS(200));
+                    }
+                    free(out_buf);
                 }
             }
         } else if (strcmp(t->valuestring, "beep") == 0 || strcmp(t->valuestring, "horn") == 0) {

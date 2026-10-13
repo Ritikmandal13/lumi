@@ -58,6 +58,8 @@ export interface ControlChannel {
   sendEmotion(name: string): void;
   sendGesture(name: string): void;
   setVolume(value: number): void;
+  sendVoice(base64Data: string): void;
+  sendVoiceBytes(bytes: Uint8Array): void;
 }
 
 // ─── Sessions ────────────────────────────────────────────────────

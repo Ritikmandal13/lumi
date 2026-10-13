@@ -6,7 +6,7 @@
  * Emotions & Gestures drawer, live telemetry HUD, and End Session flow.
  */
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -18,8 +18,15 @@ import {
   ScrollView,
   Platform,
   PermissionsAndroid,
+  BackHandler,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
+import {
+  useAudioRecorder,
+  AudioModule,
+  RecordingPresets,
+  setAudioModeAsync,
+} from 'expo-audio';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
@@ -32,6 +39,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useTranslation } from 'react-i18next';
 import {
+  ArrowLeft,
   PhoneOff,
   BatteryMedium,
   Wifi,
@@ -101,11 +109,13 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
   cameraStreamUrl,
   onHasCloudFrameChange,
 }: DoubleBufferedCameraFeedProps) {
-  // Dual-slot ping-pong buffer ensures 0% flicker: the active frame remains 100% visible while the new frame decodes underneath
+  // Dual-slot ping-pong buffer ensures 0% flicker:
+  // Slot A and Slot B alternate so the active frame remains 100% visible while the new frame loads.
   const [frameA, setFrameA] = useState<string | null>(null);
   const [frameB, setFrameB] = useState<string | null>(null);
   const [activeSlot, setActiveSlot] = useState<'A' | 'B'>('A');
   const activeSlotRef = useRef<'A' | 'B'>('A');
+  const hasInitialFrameRef = useRef<boolean>(false);
 
   useEffect(() => {
     let mounted = true;
@@ -113,14 +123,27 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
       if (!mounted) return;
       if (uri) {
         onHasCloudFrameChange?.(true);
-        // Stage next frame into the background slot
+
+        // Immediate first-frame rendering: seed Slot A directly so image shows instantly with opacity 1
+        if (!hasInitialFrameRef.current) {
+          hasInitialFrameRef.current = true;
+          setFrameA(uri);
+          setActiveSlot('A');
+          activeSlotRef.current = 'A';
+          return;
+        }
+
+        // Ping-pong: stage the next frame into the background slot
         if (activeSlotRef.current === 'A') {
           setFrameB(uri);
         } else {
           setFrameA(uri);
         }
       } else {
+        hasInitialFrameRef.current = false;
         onHasCloudFrameChange?.(false);
+        setFrameA(null);
+        setFrameB(null);
       }
     });
 
@@ -140,6 +163,12 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
     setActiveSlot('B');
   };
 
+  // If only one frame exists, guarantee it is 100% visible so the viewport never shows black
+  const showOnlyA = !!frameA && !frameB;
+  const showOnlyB = !frameA && !!frameB;
+  const opacityA = showOnlyA || activeSlot === 'A' ? 1 : 0;
+  const opacityB = showOnlyB || activeSlot === 'B' ? 1 : 0;
+
   if (frameA || frameB) {
     return (
       <View style={StyleSheet.absoluteFill}>
@@ -148,11 +177,12 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
             source={{ uri: frameA }}
             style={[
               styles.cameraImageFull,
-              { opacity: activeSlot === 'A' ? 1 : 0 },
+              { opacity: opacityA },
             ]}
             resizeMode="contain"
             fadeDuration={0}
             onLoad={handleFrameALoad}
+            onError={handleFrameBLoad}
           />
         )}
         {frameB && (
@@ -160,11 +190,12 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
             source={{ uri: frameB }}
             style={[
               styles.cameraImageFull,
-              { opacity: activeSlot === 'B' ? 1 : 0 },
+              { opacity: opacityB },
             ]}
             resizeMode="contain"
             fadeDuration={0}
             onLoad={handleFrameBLoad}
+            onError={handleFrameALoad}
           />
         )}
       </View>
@@ -222,6 +253,9 @@ export default function DriveScreen() {
   const [isTalking, setIsTalking] = useState(false);
   const [isMicLocked, setIsMicLocked] = useState(false);
 
+  // Audio Recorder for Walkie-Talkie Voice Clips
+  const audioRecorder = useAudioRecorder(RecordingPresets.LOW_QUALITY);
+
   // LiveKit Remote Video Track
   const [videoTrack, setVideoTrack] = useState<any>(null);
 
@@ -240,6 +274,24 @@ export default function DriveScreen() {
     };
   }, []);
 
+  const handleBackPress = useCallback(() => {
+    controlChannel.stopDriving();
+    liveService.disconnect().catch(() => {});
+    router.back();
+  }, [router]);
+
+  useEffect(() => {
+    const onBackPress = () => {
+      handleBackPress();
+      return true;
+    };
+
+    const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    return () => {
+      sub.remove();
+    };
+  }, [handleBackPress]);
+
   // Sync PTT talk state with robot microphone and send walkie-talkie cues
   useEffect(() => {
     const active = isTalking || isMicLocked;
@@ -252,6 +304,18 @@ export default function DriveScreen() {
   }, [isTalking, isMicLocked]);
 
   const ensureMicrophonePermission = async (): Promise<boolean> => {
+    try {
+      const status = await AudioModule.requestRecordingPermissionsAsync();
+      if (status.granted) {
+        await setAudioModeAsync({
+          allowsRecording: true,
+          playsInSilentMode: true,
+        });
+        return true;
+      }
+    } catch {
+      // fallback to PermissionsAndroid
+    }
     if (Platform.OS === 'android') {
       try {
         const hasPermission = await PermissionsAndroid.check(
@@ -274,6 +338,47 @@ export default function DriveScreen() {
       }
     }
     return true;
+  };
+
+  const handleStartTalking = async () => {
+    if (isMicLocked) return;
+    const ok = await ensureMicrophonePermission();
+    if (!ok) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    setIsTalking(true);
+    try {
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+    } catch (err) {
+      console.warn('[PTT] Start recording failed:', err);
+    }
+  };
+
+  const handleStopTalking = async () => {
+    if (isMicLocked) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    setIsTalking(false);
+    try {
+      if (audioRecorder.isRecording) {
+        await audioRecorder.stop();
+        const uri = audioRecorder.uri;
+        if (uri) {
+          const resp = await fetch(uri);
+          const blob = await resp.blob();
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const res = reader.result as string;
+            const base64Data = res?.includes(',') ? res.split(',')[1] : res;
+            if (base64Data) {
+              controlChannel.sendVoice(base64Data);
+            }
+          };
+          reader.readAsDataURL(blob);
+        }
+      }
+    } catch (err) {
+      console.warn('[PTT] Stop recording/send failed:', err);
+    }
   };
 
   // Actions Drawer
@@ -329,11 +434,15 @@ export default function DriveScreen() {
             }
           },
           onError: (err) => {
-            showAlert('Cloud Connection Error', err, undefined, 'warning');
+            if (mounted) {
+              showAlert('Cloud Connection Error', err, undefined, 'warning');
+            }
           },
         });
       } catch (err: any) {
-        showAlert('Connection Failed', err.message || 'Failed to connect to LUMI Cloud', undefined, 'danger');
+        if (mounted) {
+          showAlert('Connection Failed', err.message || 'Failed to connect to LUMI Cloud', undefined, 'danger');
+        }
       }
     }
 
@@ -342,6 +451,9 @@ export default function DriveScreen() {
     return () => {
       mounted = false;
       controlChannel.stopDriving();
+      liveService.disconnect().catch((err) => {
+        console.warn('[DriveScreen] Error disconnecting on unmount:', err);
+      });
     };
   }, [id]);
 
@@ -352,6 +464,8 @@ export default function DriveScreen() {
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
       onPanResponderMove: (_, gestureState) => {
         const dx = gestureState.dx;
         const dy = gestureState.dy;
@@ -490,6 +604,13 @@ export default function DriveScreen() {
       <View style={[styles.topHud, { paddingTop: insets.top + spacing.xs }]}>
         {/* Robot & Emotion preview */}
         <View style={styles.hudLeft}>
+          <Pressable
+            onPress={handleBackPress}
+            hitSlop={10}
+            style={styles.backBtn}
+          >
+            <ArrowLeft size={22} color="#FFFFFF" />
+          </Pressable>
           <View style={[styles.miniFaceWrap, { backgroundColor: faceColor + '2A' }]}>
             <RobotFace size={26} color={faceColor} emotion={activeEmotion} />
           </View>
@@ -554,42 +675,40 @@ export default function DriveScreen() {
         </View>
       )}
 
-      {/* ── Camera Viewport Container (Centers 4:3 Feed Without Zooming) ── */}
-      <View style={styles.cameraViewportContainer}>
-        <View style={styles.cameraViewport}>
-          <DoubleBufferedCameraFeed
-            videoTrack={videoTrack}
-            cameraStreamUrl={cameraStreamUrl}
-            onHasCloudFrameChange={setHasCloudFeed}
-          />
+      {/* ── Robot Cockpit: Native 4:3 Camera Viewport directly under Top HUD ── */}
+      <View style={styles.cameraViewport}>
+        <DoubleBufferedCameraFeed
+          videoTrack={videoTrack}
+          cameraStreamUrl={cameraStreamUrl}
+          onHasCloudFrameChange={setHasCloudFeed}
+        />
 
-          {/* Bottom stream indicators */}
-          <View style={styles.viewportOverlayBottom}>
-            <View style={styles.videoQualityTag}>
-              <Video size={12} color="#94A3B8" />
-              <Text style={styles.videoQualityText}>
-                {hasCloudFeed || videoTrack
-                  ? 'LiveKit Cloud WebRTC (Worldwide)'
-                  : cameraStreamUrl
-                  ? `OV3660 HD Stream (${cameraStreamUrl}/stream)`
-                  : 'LUMI Robot Video'}
-              </Text>
-            </View>
-            <Text style={styles.timestampOverlay}>
-              {new Date().toLocaleTimeString()}
+        {/* Bottom stream indicators */}
+        <View style={styles.viewportOverlayBottom}>
+          <View style={styles.videoQualityTag}>
+            <Video size={12} color="#94A3B8" />
+            <Text style={styles.videoQualityText}>
+              {hasCloudFeed || videoTrack
+                ? 'LiveKit Cloud WebRTC (Worldwide)'
+                : cameraStreamUrl
+                ? `OV3660 HD Stream (${cameraStreamUrl}/stream)`
+                : 'LUMI Robot Video'}
             </Text>
           </View>
-
-          {/* Connecting overlay */}
-          {connectionState === 'connecting' && (
-            <View style={styles.connectingOverlay}>
-              <RobotFace size={60} color={faceColor} emotion="curious" />
-              <Text style={styles.connectingText}>
-                {t('live.findingLumi', 'Connecting to LUMI Cloud…')}
-              </Text>
-            </View>
-          )}
+          <Text style={styles.timestampOverlay}>
+            {new Date().toLocaleTimeString()}
+          </Text>
         </View>
+
+        {/* Connecting overlay */}
+        {connectionState === 'connecting' && (
+          <View style={styles.connectingOverlay}>
+            <RobotFace size={60} color={faceColor} emotion="curious" />
+            <Text style={styles.connectingText}>
+              {t('live.findingLumi', 'Connecting to LUMI Cloud…')}
+            </Text>
+          </View>
+        )}
       </View>
 
       {/* ── Control Console Area ── */}
@@ -681,21 +800,8 @@ export default function DriveScreen() {
               />
 
               <Pressable
-                onPressIn={async () => {
-                  if (!isMicLocked) {
-                    const ok = await ensureMicrophonePermission();
-                    if (ok) {
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-                      setIsTalking(true);
-                    }
-                  }
-                }}
-                onPressOut={() => {
-                  if (!isMicLocked) {
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-                    setIsTalking(false);
-                  }
-                }}
+                onPressIn={handleStartTalking}
+                onPressOut={handleStopTalking}
                 pressRetentionOffset={{ top: 30, bottom: 30, left: 30, right: 30 }}
                 hitSlop={10}
                 style={[
@@ -717,10 +823,15 @@ export default function DriveScreen() {
 
               {/* Lock Toggle Button */}
               <Pressable
-                onPress={() => {
+                onPress={async () => {
                   const nextLock = !isMicLocked;
-                  setIsMicLocked(nextLock);
-                  setIsTalking(false);
+                  if (nextLock) {
+                    await handleStartTalking();
+                    setIsMicLocked(true);
+                  } else {
+                    setIsMicLocked(false);
+                    await handleStopTalking();
+                  }
                 }}
                 style={[
                   styles.lockBtn,
@@ -847,6 +958,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
   },
+  backBtn: {
+    padding: 4,
+    marginRight: 2,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   miniFaceWrap: {
     width: 38,
     height: 38,
@@ -920,13 +1037,6 @@ const styles = StyleSheet.create({
     color: '#000',
     fontSize: 12,
     fontWeight: '700',
-  },
-  cameraViewportContainer: {
-    flex: 1,
-    backgroundColor: '#020617',
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
   },
   cameraViewport: {
     width: '100%',
@@ -1013,13 +1123,14 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   controlsArea: {
-    backgroundColor: '#0F172A',
+    flex: 1,
+    backgroundColor: '#0A0F1D',
     borderTopWidth: 1,
     borderTopColor: '#1E293B',
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.md,
-    paddingBottom: Platform.OS === 'ios' ? 36 : spacing.lg,
-    gap: spacing.md,
+    justifyContent: 'space-evenly',
+    gap: spacing.sm,
   },
   toolRow: {
     flexDirection: 'row',

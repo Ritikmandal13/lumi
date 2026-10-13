@@ -36,6 +36,14 @@ export const mockControlChannel: ControlChannel = {
   setVolume(value: number): void {
     this.send({ t: 'volume', value });
   },
+
+  sendVoice(base64Data: string): void {
+    this.send({ t: 'voice', data: base64Data });
+  },
+
+  sendVoiceBytes(bytes: Uint8Array): void {
+    console.log('[MockControl] sendVoiceBytes size:', bytes.length);
+  },
 };
 
 // For developer overlay
