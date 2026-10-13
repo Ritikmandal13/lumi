@@ -349,7 +349,7 @@ static esp_err_t init_camera(void) {
         .ledc_channel = LEDC_CHANNEL_7,
         .pixel_format = PIXFORMAT_JPEG,
         .frame_size = FRAMESIZE_QVGA, // 320x240 for smooth, ultra-low latency worldwide streaming
-        .jpeg_quality = 20, // Tuned for optimal SCTP packet pacing without queue buffer drops
+        .jpeg_quality = 22, // Optimized for smooth streaming without choking 2.4GHz Wi-Fi or SCTP buffers
         .fb_count = 2,
         .grab_mode = CAMERA_GRAB_LATEST,
         .fb_location = CAMERA_FB_IN_PSRAM
@@ -558,25 +558,48 @@ static char* http_post_json(const char *url, const char *json_body) {
 static void on_data_received(const livekit_data_received_t *data, void *ctx) {
     if (!data || !data->payload.bytes || data->payload.size == 0) return;
 
-    // 1. Direct binary audio stream over WebRTC data channel (topic "voice_stream" or "voice")
-    // Safeguard: Never write JSON string data {"... directly to I2S DAC DMA (causes static)!
-    if (data->topic && (strcmp(data->topic, "voice_stream") == 0 || strcmp(data->topic, "voice") == 0)) {
-        if (data->payload.size > 0 && data->payload.bytes[0] != '{') {
+    // 1. Direct binary audio stream over WebRTC data channel (topic "voice_stream")
+    if (data->topic && strcmp(data->topic, "voice_stream") == 0) {
+        if (s_i2s_tx_handle && data->payload.size > 0) {
+            // Incoming phone stream is 16-bit 16kHz mono PCM.
+            // Duplicate mono into stereo (Left + Right) for MAX98357A I2S DAC with digital gain boost.
+            size_t mono_samples = data->payload.size / sizeof(int16_t);
+            if (mono_samples > 0) {
+                int16_t *stereo_buf = malloc(mono_samples * 2 * sizeof(int16_t));
+                if (stereo_buf) {
+                    const int16_t *mono_ptr = (const int16_t *)data->payload.bytes;
+                    for (size_t i = 0; i < mono_samples; i++) {
+                        int32_t boosted = (int32_t)mono_ptr[i] * 2; // +6dB gain boost for walkie-talkie projection
+                        if (boosted > 32767) boosted = 32767;
+                        if (boosted < -32768) boosted = -32768;
+                        int16_t sample = (int16_t)boosted;
+                        stereo_buf[i * 2]     = sample;
+                        stereo_buf[i * 2 + 1] = sample;
+                    }
+                    size_t written = 0;
+                    i2s_channel_write(s_i2s_tx_handle, stereo_buf, mono_samples * 2 * sizeof(int16_t), &written, pdMS_TO_TICKS(100));
+                    free(stereo_buf);
+                }
+            }
+        }
+        return;
+    }
+
+    // Legacy binary audio over topic "voice" (safeguard against JSON {"...)
+    if (data->topic && strcmp(data->topic, "voice") == 0) {
+        if (data->payload.size > 2 && !(data->payload.bytes[0] == '{' && (data->payload.bytes[1] == '"' || data->payload.bytes[1] == '\''))) {
             if (s_i2s_tx_handle) {
-                // Incoming phone stream is 16-bit 16kHz mono PCM.
-                // Duplicate mono into stereo (Left + Right) for MAX98357A I2S DAC with digital gain boost.
                 size_t mono_samples = data->payload.size / sizeof(int16_t);
                 if (mono_samples > 0) {
                     int16_t *stereo_buf = malloc(mono_samples * 2 * sizeof(int16_t));
                     if (stereo_buf) {
                         const int16_t *mono_ptr = (const int16_t *)data->payload.bytes;
                         for (size_t i = 0; i < mono_samples; i++) {
-                            int32_t boosted = (int32_t)mono_ptr[i] * 2; // +6dB gain boost for walkie-talkie projection
+                            int32_t boosted = (int32_t)mono_ptr[i] * 2;
                             if (boosted > 32767) boosted = 32767;
                             if (boosted < -32768) boosted = -32768;
-                            int16_t sample = (int16_t)boosted;
-                            stereo_buf[i * 2]     = sample;
-                            stereo_buf[i * 2 + 1] = sample;
+                            stereo_buf[i * 2]     = (int16_t)boosted;
+                            stereo_buf[i * 2 + 1] = (int16_t)boosted;
                         }
                         size_t written = 0;
                         i2s_channel_write(s_i2s_tx_handle, stereo_buf, mono_samples * 2 * sizeof(int16_t), &written, pdMS_TO_TICKS(100));
@@ -717,13 +740,13 @@ static void video_stream_task(void *pvParameters) {
                     livekit_err_t res = livekit_room_publish_data(s_room_handle, &pub_opts);
                     esp_camera_fb_return(fb);
                     if (res != LIVEKIT_ERR_NONE) {
-                        // SCTP send queue is temporarily full, yield a bit to let it drain
-                        vTaskDelay(pdMS_TO_TICKS(50));
+                        // SCTP send queue is temporarily full, yield a bit to let it drain cleanly
+                        vTaskDelay(pdMS_TO_TICKS(120));
                     }
                 }
                 xSemaphoreGive(s_camera_mutex);
             }
-            vTaskDelay(pdMS_TO_TICKS(100)); // ~10 FPS for reliable, jitter-free transmission without queue overflows
+            vTaskDelay(pdMS_TO_TICKS(125)); // ~8 FPS for rock-solid stability, zero SCTP queue congestion, and persistent heartbeats
         } else {
             vTaskDelay(pdMS_TO_TICKS(200));
         }

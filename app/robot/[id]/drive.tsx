@@ -139,10 +139,9 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
           setFrameA(uri);
         }
       } else {
-        hasInitialFrameRef.current = false;
+        // If stream momentarily drops or reconnects, keep last frame on screen
+        // instead of flashing completely blank/black
         onHasCloudFrameChange?.(false);
-        setFrameA(null);
-        setFrameB(null);
       }
     });
 
@@ -252,20 +251,40 @@ export default function DriveScreen() {
   const [isTalking, setIsTalking] = useState(false);
   const [isMicLocked, setIsMicLocked] = useState(false);
 
+  // Active voice transmission gate ref to eliminate Android hardware restart latencies
+  const isTransmittingVoiceRef = useRef(false);
+  useEffect(() => {
+    isTransmittingVoiceRef.current = isTalking || isMicLocked;
+  }, [isTalking, isMicLocked]);
+
   // Real-time 16kHz 16-bit PCM Microphone Audio Stream for Walkie-Talkie
   const { stream: audioStream } = useAudioStream({
     sampleRate: 16000,
     channels: 1,
     encoding: 'int16',
     onBuffer: (buffer) => {
-      if (buffer?.data) {
+      if (isTransmittingVoiceRef.current && buffer?.data) {
         controlChannel.sendVoiceBytes(new Uint8Array(buffer.data));
       }
     },
   });
 
+  // Pre-warm audio stream once on mount for instant zero-latency PTT
   useEffect(() => {
+    let active = true;
+    (async () => {
+      const ok = await ensureMicrophonePermission();
+      if (ok && active) {
+        try {
+          await audioStream.start();
+        } catch (err) {
+          console.warn('[PTT] AudioStream initial start warning:', err);
+        }
+      }
+    })();
+
     return () => {
+      active = false;
       try {
         audioStream.stop();
       } catch {}
@@ -361,23 +380,16 @@ export default function DriveScreen() {
     if (!ok) return false;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     setIsTalking(true);
+    // Ensure stream is active if not already
     try {
       await audioStream.start();
-      return true;
-    } catch (err) {
-      console.warn('[PTT] Start audioStream failed:', err);
-      return false;
-    }
+    } catch {}
+    return true;
   };
 
   const stopAudioCapture = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     setIsTalking(false);
-    try {
-      audioStream.stop();
-    } catch (err) {
-      console.warn('[PTT] Stop audioStream failed:', err);
-    }
   };
 
   const handleStartTalking = async () => {
@@ -475,18 +487,20 @@ export default function DriveScreen() {
   // Active driving coordinates and heartbeat interval
   const currentCoords = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const driveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastDriveSendTimeRef = useRef<number>(0);
 
   const startDriveLoop = useCallback(() => {
     if (driveTimerRef.current) return;
     driveTimerRef.current = setInterval(() => {
       const { x, y } = currentCoords.current;
       if (Math.abs(x) > 0.01 || Math.abs(y) > 0.01) {
+        lastDriveSendTimeRef.current = Date.now();
         controlChannel.startDriving(
           Number((x * speedMultiplierRef.current).toFixed(2)),
           Number((y * speedMultiplierRef.current).toFixed(2)),
         );
       }
-    }, 60);
+    }, 75);
   }, []);
 
   const stopDriveLoop = useCallback(() => {
@@ -534,6 +548,7 @@ export default function DriveScreen() {
         const normalizedY = Number((-clampedY / MAX_DRAG).toFixed(2));
         currentCoords.current = { x: normalizedX, y: normalizedY };
 
+        lastDriveSendTimeRef.current = Date.now();
         controlChannel.startDriving(
           Number((normalizedX * speedMultiplierRef.current).toFixed(2)),
           Number((normalizedY * speedMultiplierRef.current).toFixed(2)),
@@ -561,11 +576,17 @@ export default function DriveScreen() {
         const normalizedY = Number((-clampedY / MAX_DRAG).toFixed(2));
         currentCoords.current = { x: normalizedX, y: normalizedY };
 
-        controlChannel.startDriving(
-          Number((normalizedX * speedMultiplierRef.current).toFixed(2)),
-          Number((normalizedY * speedMultiplierRef.current).toFixed(2)),
-        );
         startDriveLoop();
+
+        // Throttle gesture move events to 75ms to avoid queue saturation on high-Hz touchscreens
+        const now = Date.now();
+        if (now - lastDriveSendTimeRef.current >= 75) {
+          lastDriveSendTimeRef.current = now;
+          controlChannel.startDriving(
+            Number((normalizedX * speedMultiplierRef.current).toFixed(2)),
+            Number((normalizedY * speedMultiplierRef.current).toFixed(2)),
+          );
+        }
       },
       onPanResponderRelease: () => {
         puckX.value = withSpring(0, { damping: 15, stiffness: 200 });

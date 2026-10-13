@@ -437,8 +437,9 @@ export const livekitControlChannel: ControlChannel = {
     try {
       const encoder = new TextEncoder();
       const payload = encoder.encode(JSON.stringify(message));
-      // Use lossy for high-frequency drive updates, reliable for discrete commands
-      const reliable = message.t !== 'drive';
+      // Send reliably across the dedicated _reliable SCTP channel (stream_id: 1)
+      // which the ESP32 LiveKit C SDK is actively listening to
+      const reliable = true;
       activeRoom.localParticipant
         .publishData(payload, {
           reliable,
