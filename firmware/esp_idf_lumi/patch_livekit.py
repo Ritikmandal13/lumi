@@ -29,7 +29,7 @@ def patch():
         )
         c4, n4 = re.subn(
             r'(static\s+engine_err_t\s+subscribe_tracks\s*\(\s*engine_t\s*\*eng,\s*livekit_pb_track_info_t\s*\*tracks,\s*int\s+count\s*\)\s*\{)',
-            r'\1\n    if (eng->options.subscribe.kind == LIVEKIT_MEDIA_TYPE_NONE) return ENGINE_ERR_NONE;',
+            r'\1\n    (void)eng; (void)tracks; (void)count; return ENGINE_ERR_NONE;',
             c3
         )
 
