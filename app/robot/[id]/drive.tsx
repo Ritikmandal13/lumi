@@ -93,25 +93,32 @@ const GESTURES_LIST = [
 interface DoubleBufferedCameraFeedProps {
   videoTrack: any;
   cameraStreamUrl: string | null;
-  snapshotKey: number;
   onHasCloudFrameChange?: (hasFrame: boolean) => void;
 }
 
 const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
   videoTrack,
   cameraStreamUrl,
-  snapshotKey,
   onHasCloudFrameChange,
 }: DoubleBufferedCameraFeedProps) {
-  const [currentFrame, setCurrentFrame] = useState<string | null>(null);
+  // Dual-slot ping-pong buffer ensures 0% flicker: the active frame remains 100% visible while the new frame decodes underneath
+  const [frameA, setFrameA] = useState<string | null>(null);
+  const [frameB, setFrameB] = useState<string | null>(null);
+  const [activeSlot, setActiveSlot] = useState<'A' | 'B'>('A');
+  const activeSlotRef = useRef<'A' | 'B'>('A');
 
   useEffect(() => {
     let mounted = true;
     const unsub = subscribeToCloudVideoFrame((uri) => {
       if (!mounted) return;
       if (uri) {
-        setCurrentFrame(uri);
         onHasCloudFrameChange?.(true);
+        // Stage next frame into the background slot
+        if (activeSlotRef.current === 'A') {
+          setFrameB(uri);
+        } else {
+          setFrameA(uri);
+        }
       } else {
         onHasCloudFrameChange?.(false);
       }
@@ -123,15 +130,43 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
     };
   }, [onHasCloudFrameChange]);
 
-  if (currentFrame) {
+  const handleFrameALoad = () => {
+    activeSlotRef.current = 'A';
+    setActiveSlot('A');
+  };
+
+  const handleFrameBLoad = () => {
+    activeSlotRef.current = 'B';
+    setActiveSlot('B');
+  };
+
+  if (frameA || frameB) {
     return (
       <View style={StyleSheet.absoluteFill}>
-        <Image
-          source={{ uri: currentFrame }}
-          style={styles.cameraImageFull}
-          resizeMode="cover"
-          fadeDuration={0}
-        />
+        {frameA && (
+          <Image
+            source={{ uri: frameA }}
+            style={[
+              styles.cameraImageFull,
+              { opacity: activeSlot === 'A' ? 1 : 0 },
+            ]}
+            resizeMode="contain"
+            fadeDuration={0}
+            onLoad={handleFrameALoad}
+          />
+        )}
+        {frameB && (
+          <Image
+            source={{ uri: frameB }}
+            style={[
+              styles.cameraImageFull,
+              { opacity: activeSlot === 'B' ? 1 : 0 },
+            ]}
+            resizeMode="contain"
+            fadeDuration={0}
+            onLoad={handleFrameBLoad}
+          />
+        )}
       </View>
     );
   }
@@ -141,7 +176,7 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
       <VideoView
         videoTrack={videoTrack}
         style={StyleSheet.absoluteFill}
-        objectFit="cover"
+        objectFit="contain"
       />
     );
   }
@@ -149,10 +184,9 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
   if (cameraStreamUrl) {
     return (
       <Image
-        key={snapshotKey}
-        source={{ uri: `${cameraStreamUrl}/capture?t=${snapshotKey}` }}
-        style={StyleSheet.absoluteFill}
-        resizeMode="cover"
+        source={{ uri: `${cameraStreamUrl}/stream` }}
+        style={styles.cameraImageFull}
+        resizeMode="contain"
         fadeDuration={0}
       />
     );
@@ -196,7 +230,6 @@ export default function DriveScreen() {
 
   // Local camera stream from robot
   const [cameraStreamUrl, setCameraStreamUrl] = useState<string | null>(null);
-  const [snapshotKey, setSnapshotKey] = useState(Date.now());
 
   useEffect(() => {
     const unsubTrack = subscribeToRobotVideoTrack((track) => {
@@ -206,16 +239,6 @@ export default function DriveScreen() {
       unsubTrack();
     };
   }, []);
-
-  // Poll camera snapshot when on local stream and no WebRTC video track
-  useEffect(() => {
-    if (!videoTrack && cameraStreamUrl) {
-      const timer = setInterval(() => {
-        setSnapshotKey(Date.now());
-      }, 100);
-      return () => clearInterval(timer);
-    }
-  }, [videoTrack, cameraStreamUrl]);
 
   // Sync PTT talk state with robot microphone and send walkie-talkie cues
   useEffect(() => {
@@ -531,41 +554,42 @@ export default function DriveScreen() {
         </View>
       )}
 
-      {/* ── Camera Viewport (LiveKit Remote Cloud WebRTC) ── */}
-      <View style={styles.cameraViewport}>
-        <DoubleBufferedCameraFeed
-          videoTrack={videoTrack}
-          cameraStreamUrl={cameraStreamUrl}
-          snapshotKey={snapshotKey}
-          onHasCloudFrameChange={setHasCloudFeed}
-        />
+      {/* ── Camera Viewport Container (Centers 4:3 Feed Without Zooming) ── */}
+      <View style={styles.cameraViewportContainer}>
+        <View style={styles.cameraViewport}>
+          <DoubleBufferedCameraFeed
+            videoTrack={videoTrack}
+            cameraStreamUrl={cameraStreamUrl}
+            onHasCloudFrameChange={setHasCloudFeed}
+          />
 
-        {/* Bottom stream indicators */}
-        <View style={styles.viewportOverlayBottom}>
-          <View style={styles.videoQualityTag}>
-            <Video size={12} color="#94A3B8" />
-            <Text style={styles.videoQualityText}>
-              {hasCloudFeed || videoTrack
-                ? 'LiveKit Cloud WebRTC (Worldwide)'
-                : cameraStreamUrl
-                ? `OV3660 HD Stream (${cameraStreamUrl}/stream)`
-                : 'LUMI Robot Video'}
+          {/* Bottom stream indicators */}
+          <View style={styles.viewportOverlayBottom}>
+            <View style={styles.videoQualityTag}>
+              <Video size={12} color="#94A3B8" />
+              <Text style={styles.videoQualityText}>
+                {hasCloudFeed || videoTrack
+                  ? 'LiveKit Cloud WebRTC (Worldwide)'
+                  : cameraStreamUrl
+                  ? `OV3660 HD Stream (${cameraStreamUrl}/stream)`
+                  : 'LUMI Robot Video'}
+              </Text>
+            </View>
+            <Text style={styles.timestampOverlay}>
+              {new Date().toLocaleTimeString()}
             </Text>
           </View>
-          <Text style={styles.timestampOverlay}>
-            {new Date().toLocaleTimeString()}
-          </Text>
+
+          {/* Connecting overlay */}
+          {connectionState === 'connecting' && (
+            <View style={styles.connectingOverlay}>
+              <RobotFace size={60} color={faceColor} emotion="curious" />
+              <Text style={styles.connectingText}>
+                {t('live.findingLumi', 'Connecting to LUMI Cloud…')}
+              </Text>
+            </View>
+          )}
         </View>
-
-        {/* Connecting overlay */}
-        {connectionState === 'connecting' && (
-          <View style={styles.connectingOverlay}>
-            <RobotFace size={60} color={faceColor} emotion="curious" />
-            <Text style={styles.connectingText}>
-              {t('live.findingLumi', 'Connecting to LUMI Cloud…')}
-            </Text>
-          </View>
-        )}
       </View>
 
       {/* ── Control Console Area ── */}
@@ -897,9 +921,17 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
-  cameraViewport: {
+  cameraViewportContainer: {
     flex: 1,
     backgroundColor: '#020617',
+    justifyContent: 'center',
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  cameraViewport: {
+    width: '100%',
+    aspectRatio: 4 / 3, // Constrain to native 4:3 OV3660 camera sensor aspect ratio
+    backgroundColor: '#000000',
     position: 'relative',
     overflow: 'hidden',
     justifyContent: 'center',

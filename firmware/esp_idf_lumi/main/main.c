@@ -300,7 +300,7 @@ static esp_err_t init_camera(void) {
         .ledc_channel = LEDC_CHANNEL_7,
         .pixel_format = PIXFORMAT_JPEG,
         .frame_size = FRAMESIZE_QVGA, // 320x240 for smooth, ultra-low latency worldwide streaming
-        .jpeg_quality = 14,
+        .jpeg_quality = 20, // Tuned for optimal SCTP packet pacing without queue buffer drops
         .fb_count = 2,
         .grab_mode = CAMERA_GRAB_LATEST,
         .fb_location = CAMERA_FB_IN_PSRAM

@@ -27,11 +27,16 @@ def patch():
             r'\1\n    if (eng->options.media.capturer == NULL) return ENGINE_ERR_NONE;',
             c2
         )
+        c4, n4 = re.subn(
+            r'(static\s+engine_err_t\s+subscribe_tracks\s*\(\s*engine_t\s*\*eng,\s*livekit_pb_track_info_t\s*\*tracks,\s*int\s+count\s*\)\s*\{)',
+            r'\1\n    if (eng->options.subscribe.kind == LIVEKIT_MEDIA_TYPE_NONE) return ENGINE_ERR_NONE;',
+            c3
+        )
 
         with open(path, 'w', encoding='utf-8') as f:
-            f.write(c3)
+            f.write(c4)
 
-        print(f'Successfully patched {path}: enable_capture_sink={n1}, media_stream_begin={n2}, media_stream_end={n3}')
+        print(f'Successfully patched {path}: enable_capture_sink={n1}, media_stream_begin={n2}, media_stream_end={n3}, subscribe_tracks={n4}')
 
 if __name__ == '__main__':
     patch()

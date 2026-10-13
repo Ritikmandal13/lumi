@@ -106,13 +106,9 @@ export function getRobotVideoTrack(): RemoteTrack | null {
   return currentVideoTrack;
 }
 
-export async function setRobotMicrophone(enabled: boolean): Promise<void> {
-  if (!activeRoom || !activeRoom.localParticipant) return;
-  try {
-    await activeRoom.localParticipant.setMicrophoneEnabled(enabled);
-  } catch (err) {
-    console.warn('[LiveKit] Failed to toggle microphone:', err);
-  }
+export async function setRobotMicrophone(_enabled: boolean): Promise<void> {
+  // Intentionally NO-OP for WebRTC audio tracks to prevent ESP32 client-sdk-esp32 DTLS crash (-30848).
+  // Walkie-Talkie Push-to-Talk (PTT) is handled strictly over reliable Data Channel ('mic_start'/'mic_stop').
 }
 
 export const livekitLiveService: LiveService = {
@@ -260,9 +256,13 @@ export const livekitLiveService: LiveService = {
         ) => {
           // 1. Worldwide LiveKit WebRTC Video Frame (topic 'video' or raw JPEG header)
           if (topic === 'video' || (payload.length > 4 && payload[0] === 0xFF && payload[1] === 0xD8)) {
-            const base64 = uint8ArrayToBase64(payload);
-            const frameUri = `data:image/jpeg;base64,${base64}`;
-            notifyCloudVideoFrame(frameUri);
+            // Verify full complete JPEG frame with both SOI (0xFF, 0xD8) and EOI (0xFF, 0xD9)
+            // Dropped SCTP network chunks will be discarded immediately to prevent black flicker!
+            if (payload.length > 4 && payload[payload.length - 2] === 0xFF && payload[payload.length - 1] === 0xD9) {
+              const base64 = uint8ArrayToBase64(payload);
+              const frameUri = `data:image/jpeg;base64,${base64}`;
+              notifyCloudVideoFrame(frameUri);
+            }
             return;
           }
 
