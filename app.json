@@ -26,7 +26,9 @@
         "android.permission.INTERNET",
         "android.permission.SYSTEM_ALERT_WINDOW",
         "android.permission.WAKE_LOCK",
-        "android.permission.BLUETOOTH"
+        "android.permission.BLUETOOTH",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#0D0E1A",
@@ -69,9 +71,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "b02edee7-e22c-400d-a237-ddf714ba5cf4"
+        "projectId": "6651d7d2-363b-4998-ac91-c1530e552e29"
       }
     },
-    "owner": "http_ritik"
+    "owner": "ritik2013"
   }
 }

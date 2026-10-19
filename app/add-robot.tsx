@@ -15,6 +15,7 @@ import {
   Pressable,
   KeyboardAvoidingView,
   Platform,
+  Linking,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -344,6 +345,36 @@ export default function AddRobotScreen() {
               <HelpCircle size={16} color={colors.primary} />
               <Text style={[styles.helpLinkText, { color: colors.primary }]}>
                 {t('addRobot.codeNotShowing', 'Code not showing?')}
+              </Text>
+            </Pressable>
+
+            {/* Interactive Wi-Fi Setup Guidance Pill */}
+            <Pressable
+              onPress={() => {
+                haptics.selection();
+                showAlert(
+                  'Connect LUMI to Wi-Fi / Hotspot',
+                  '1. If LUMI is not connected to Wi-Fi, its screen shows "SETUP WI-FI".\n\n2. Open your phone Settings > Wi-Fi.\n\n3. Connect to Wi-Fi: "LUMI-Setup".\n\n4. Tap "Open Setup Page" below (or browse 192.168.4.1).\n\n5. Select your Hotspot name and enter password.\n\nOnce connected, LUMI\'s screen shows the 6-digit code!',
+                  [
+                    { text: 'Got it', style: 'cancel' },
+                    {
+                      text: 'Open Setup Page',
+                      style: 'default',
+                      onPress: () => {
+                        Linking.openURL('http://192.168.4.1').catch(() => {
+                          showAlert('Note', 'Please connect your phone to "LUMI-Setup" Wi-Fi first.');
+                        });
+                      },
+                    },
+                  ],
+                  'info'
+                );
+              }}
+              style={[styles.wifiGuidePill, { borderColor: colors.primary + '50' }]}
+            >
+              <Wifi size={16} color={colors.primary} />
+              <Text style={[styles.wifiGuideText, { color: colors.primary }]}>
+                Need to connect LUMI to your Hotspot?
               </Text>
             </Pressable>
           </ScrollView>
@@ -708,5 +739,20 @@ const styles = StyleSheet.create({
     paddingBottom: Platform.OS === 'ios' ? spacing.xl : spacing.lg,
     borderTopWidth: 1,
     gap: spacing.xs,
+  },
+  wifiGuidePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: radius.full,
+    borderWidth: 1.5,
+    marginTop: spacing.md,
+    alignSelf: 'center',
+  },
+  wifiGuideText: {
+    ...typography.caption,
+    fontWeight: '700',
   },
 });

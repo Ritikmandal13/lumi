@@ -13,6 +13,7 @@ import {
   Pressable,
   Switch,
   ActivityIndicator,
+  Modal,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -21,11 +22,14 @@ import { useTranslation } from 'react-i18next';
 import {
   ArrowLeft,
   Trash2,
+  Wifi,
+  X,
 } from 'lucide-react-native';
 import { useTheme } from '../../../src/theme';
 import { typography, spacing, radius, robotColors, type RobotColorKey } from '../../../src/theme/tokens';
-import { robotService } from '../../../src/services';
+import { robotService, controlChannel } from '../../../src/services';
 import { TextField } from '../../../src/components/TextField';
+import { Button } from '../../../src/components/Button';
 import { showAlert } from '../../../src/features/dialog/dialogStore';
 import { haptics } from '../../../src/utils/haptics';
 import type { Robot } from '../../../src/types';
@@ -52,6 +56,36 @@ function SettingsForm({ robot, id }: SettingsFormProps) {
   const [notifyOnConnect, setNotifyOnConnect] = useState(true);
   const [obstacleStop, setObstacleStop] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+
+  // Wi-Fi Configuration State
+  const [showWifiModal, setShowWifiModal] = useState(false);
+  const [newWifiSsid, setNewWifiSsid] = useState('');
+  const [newWifiPass, setNewWifiPass] = useState('');
+  const [isSendingWifi, setIsSendingWifi] = useState(false);
+
+  const handleSaveWifi = () => {
+    if (!newWifiSsid.trim()) {
+      showAlert('Required', 'Please enter a Wi-Fi or Hotspot name.', undefined, 'warning');
+      return;
+    }
+    haptics.medium();
+    setIsSendingWifi(true);
+    controlChannel.send({
+      t: 'wifi_config',
+      ssid: newWifiSsid.trim(),
+      pass: newWifiPass,
+    });
+    setTimeout(() => {
+      setIsSendingWifi(false);
+      setShowWifiModal(false);
+      showAlert(
+        'Wi-Fi Updated',
+        `LUMI will now connect to "${newWifiSsid.trim()}". Check LUMI's screen or reconnect in the app.`,
+        undefined,
+        'success'
+      );
+    }, 400);
+  };
 
   const handleSaveGeneral = async () => {
     if (!name.trim()) {
@@ -275,6 +309,41 @@ function SettingsForm({ robot, id }: SettingsFormProps) {
           </View>
         </View>
 
+        {/* Wi-Fi & Hotspot Configuration */}
+        <Text style={[styles.sectionTitle, { color: colors.textTertiary }]}>
+          WI-FI & HOTSPOT
+        </Text>
+        <View
+          style={[
+            styles.card,
+            { backgroundColor: colors.surface, borderColor: colors.border },
+          ]}
+        >
+          <Pressable
+            onPress={() => {
+              haptics.selection();
+              setShowWifiModal(true);
+            }}
+            style={({ pressed }) => [
+              styles.pressableRow,
+              { alignItems: 'flex-start' },
+              pressed && { backgroundColor: colors.surfaceAlt },
+            ]}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <Wifi size={20} color={colors.primary} />
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.pressableRowText, { color: colors.textPrimary, textAlign: 'left' }]}>
+                  Change Wi-Fi / Hotspot
+                </Text>
+                <Text style={{ fontSize: 13, color: colors.textSecondary, marginTop: 2 }}>
+                  Switch LUMI to a new phone hotspot or home router
+                </Text>
+              </View>
+            </View>
+          </Pressable>
+        </View>
+
         {/* Device Information */}
         <Text style={[styles.sectionTitle, { color: colors.textTertiary }]}>
           {t('robotSettings.device', 'DEVICE')}
@@ -378,6 +447,78 @@ function SettingsForm({ robot, id }: SettingsFormProps) {
           </Pressable>
         </View>
       </ScrollView>
+
+      {/* Change Wi-Fi / Hotspot Modal */}
+      <Modal
+        visible={showWifiModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowWifiModal(false)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setShowWifiModal(false)}>
+          <Pressable
+            style={[
+              styles.modalCard,
+              { backgroundColor: colors.surface, borderColor: colors.border },
+            ]}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <View style={styles.modalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <Wifi size={22} color={colors.primary} />
+                <Text style={[styles.modalTitle, { color: colors.textPrimary }]}>
+                  Change Wi-Fi Network
+                </Text>
+              </View>
+              <Pressable onPress={() => setShowWifiModal(false)} hitSlop={8}>
+                <X size={20} color={colors.textSecondary} />
+              </Pressable>
+            </View>
+
+            <Text style={[styles.modalDesc, { color: colors.textSecondary }]}>
+              Enter your phone hotspot or home Wi-Fi credentials. LUMI will save them and reconnect immediately.
+            </Text>
+
+            <View style={{ gap: spacing.md }}>
+              <TextField
+                label="Network Name (SSID)"
+                value={newWifiSsid}
+                onChangeText={setNewWifiSsid}
+                placeholder="e.g. My Phone Hotspot"
+                autoFocus
+              />
+
+              <TextField
+                label="Password"
+                value={newWifiPass}
+                onChangeText={setNewWifiPass}
+                placeholder="Password (leave blank if open)"
+                secureTextEntry
+              />
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md }}>
+              <Button
+                variant="ghost"
+                size="md"
+                style={{ flex: 1 }}
+                onPress={() => setShowWifiModal(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="md"
+                style={{ flex: 1 }}
+                loading={isSendingWifi}
+                onPress={handleSaveWifi}
+              >
+                Save & Connect
+              </Button>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -520,5 +661,33 @@ const styles = StyleSheet.create({
   },
   divider: {
     height: 1,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.55)',
+    justifyContent: 'flex-end',
+  },
+  modalCard: {
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    padding: spacing.xl,
+    borderTopWidth: 1,
+    gap: spacing.md,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.xs,
+  },
+  modalTitle: {
+    ...typography.h3,
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  modalDesc: {
+    ...typography.caption,
+    lineHeight: 18,
+    marginBottom: spacing.sm,
   },
 });

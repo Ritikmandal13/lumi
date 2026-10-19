@@ -12,7 +12,7 @@ extern "C" {
 #define OLED_I2C_SDA_PIN    21
 #define OLED_I2C_SCL_PIN    47
 #define OLED_I2C_PORT       0
-#define OLED_I2C_FREQ_HZ    100000
+#define OLED_I2C_FREQ_HZ    400000
 
 #define OLED_WIDTH          128
 #define OLED_HEIGHT         64
@@ -32,6 +32,11 @@ void oled_clear(void);
  * Display the 6-digit LUMI cloud pairing code screen.
  */
 void oled_show_pairing_screen(const char *code);
+
+/**
+ * Display the Wi-Fi Provisioning & Hotspot Setup screen.
+ */
+void oled_show_wifi_setup_screen(const char *ap_ssid);
 
 /**
  * Render eyes by mood and gaze direction.
@@ -65,6 +70,11 @@ void oled_start_animation_task(void);
  * Set whether robot is paired. Once paired, display switches from code to animated eyes.
  */
 void oled_set_paired(bool paired);
+
+/**
+ * Set fine-grained analog gaze offset from joystick (-1.0 to +1.0 for X and Y).
+ */
+void oled_set_gaze_offset(float x_ratio, float y_ratio);
 
 #ifdef __cplusplus
 }

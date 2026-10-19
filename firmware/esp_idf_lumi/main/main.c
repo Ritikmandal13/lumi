@@ -21,6 +21,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_http_client.h"
 #include "esp_http_server.h"
 #include "esp_crt_bundle.h"
@@ -43,8 +44,13 @@ static const char *TAG = "LUMI_ROBOT";
 // 1. CREDENTIALS & ENDPOINTS
 // ==============================================================================
 
-#define WIFI_SSID           "Anmol's S24 FE"
-#define WIFI_PASS           "11111111"
+// Wi-Fi credentials are kept dynamic: stored in NVS flash, or provisioned via LUMI-Setup SoftAP
+#define NVS_NAMESPACE_WIFI  "lumi_wifi"
+#define NVS_KEY_SSID        "ssid"
+#define NVS_KEY_PASS        "pass"
+
+static char s_wifi_ssid[64] = "";
+static char s_wifi_pass[64] = "";
 
 #define SUPABASE_BASE_URL   "https://ehqqlxcdscgsebiodxfk.supabase.co"
 #define LUMI_ID             "LUMI-001"
@@ -91,30 +97,115 @@ static const char *TAG = "LUMI_ROBOT";
 #define CAM_PIN_PCLK        13
 
 // ==============================================================================
-// 3. MOTOR CONTROLLER
+// 3. MOTOR CONTROLLER & TRICKS ENGINE
 // ==============================================================================
 
-// Turn off the blinding onboard WS2812 RGB LED sharing GPIO 48
+// Fast hardware clamping on first boot to guarantee ZERO motor twitch/spin
+static void early_clamp_motor_pins(void) {
+    const gpio_num_t motor_pins[4] = {
+        (gpio_num_t)MOTOR_LEFT_IN1,
+        (gpio_num_t)MOTOR_LEFT_IN2,
+        (gpio_num_t)MOTOR_RIGHT_IN3,
+        (gpio_num_t)MOTOR_RIGHT_IN4
+    };
+    for (int i = 0; i < 4; i++) {
+        gpio_reset_pin(motor_pins[i]);
+        gpio_set_direction(motor_pins[i], GPIO_MODE_OUTPUT);
+        gpio_set_pull_mode(motor_pins[i], GPIO_PULLDOWN_ONLY);
+        gpio_set_level(motor_pins[i], 0);
+    }
+}
+
+// Extinguish the onboard WS2812 RGB LED sharing GPIO 48 without driving motor
 static void ws2812_turn_off_gpio48(void) {
     gpio_reset_pin(GPIO_NUM_48);
     gpio_set_direction(GPIO_NUM_48, GPIO_MODE_OUTPUT);
+    gpio_set_pull_mode(GPIO_NUM_48, GPIO_PULLDOWN_ONLY);
     gpio_set_level(GPIO_NUM_48, 0);
-    esp_rom_delay_us(350); // WS2812 reset signal (>300us LOW)
-    // Send 24 bits of 0 (GRB = 0, 0, 0)
-    for (int i = 0; i < 24; i++) {
-        gpio_set_level(GPIO_NUM_48, 1);
-        esp_rom_delay_us(1);
-        gpio_set_level(GPIO_NUM_48, 0);
-        esp_rom_delay_us(2);
-    }
-    gpio_set_level(GPIO_NUM_48, 0);
-    esp_rom_delay_us(350);
 }
+
+// Robot Gesture / Trick Engine
+typedef enum {
+    GESTURE_NONE = 0,
+    GESTURE_SPIN_360,
+    GESTURE_SURVEILLANCE_360
+} robot_gesture_t;
+
+static robot_gesture_t s_active_gesture = GESTURE_NONE;
+static uint32_t s_gesture_start_ms = 0;
+static uint32_t s_gesture_duration_ms = 0;
+static uint32_t s_last_drive_ms = 0;
+static bool s_motors_active = false;
 
 static void motor_watchdog_task(void *pvParameters);
 
+static void set_motor_speeds(int left_pwm, bool left_fwd, int right_pwm, bool right_fwd) {
+    if (left_pwm <= 0) {
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN1, 0);
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, 0);
+    } else if (left_fwd) {
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN1, left_pwm);
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, 0);
+    } else {
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN1, 0);
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, left_pwm);
+    }
+
+    if (right_pwm <= 0) {
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN3, 0);
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN4, 0);
+    } else if (right_fwd) {
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN3, right_pwm);
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN4, 0);
+    } else {
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN3, 0);
+        ledc_set_duty(LEDC_MODE, LEDC_CH_IN4, right_pwm);
+    }
+
+    ledc_update_duty(LEDC_MODE, LEDC_CH_IN1);
+    ledc_update_duty(LEDC_MODE, LEDC_CH_IN2);
+    ledc_update_duty(LEDC_MODE, LEDC_CH_IN3);
+    ledc_update_duty(LEDC_MODE, LEDC_CH_IN4);
+}
+
+static void stop_motors(void) {
+    s_motors_active = false;
+    s_active_gesture = GESTURE_NONE;
+    set_motor_speeds(0, true, 0, true);
+}
+
+static void cancel_active_gesture(void) {
+    if (s_active_gesture != GESTURE_NONE) {
+        s_active_gesture = GESTURE_NONE;
+        stop_motors();
+        oled_set_emotion_by_name("neutral");
+    }
+}
+
+static void start_gesture(robot_gesture_t gesture) {
+    cancel_active_gesture();
+    s_active_gesture = gesture;
+    s_gesture_start_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    s_motors_active = true;
+    s_last_drive_ms = s_gesture_start_ms;
+
+    if (gesture == GESTURE_SPIN_360) {
+        s_gesture_duration_ms = 950;
+        ESP_LOGI(TAG, "🌀 Trick: Executing 360 Spin (fast rotation, 950ms)");
+        oled_set_emotion_by_name("excited");
+        // Left FWD 235 duty, Right REV 235 duty
+        set_motor_speeds(235, true, 235, false);
+    } else if (gesture == GESTURE_SURVEILLANCE_360) {
+        s_gesture_duration_ms = 4800;
+        ESP_LOGI(TAG, "👀 Trick: Executing 360 Surveillance Scan (smooth panoramic, 4800ms)");
+        oled_set_emotion_by_name("curious");
+        // Left FWD 155 duty, Right REV 155 duty (slow and steady for camera clarity)
+        set_motor_speeds(155, true, 155, false);
+    }
+}
+
 static void init_motors(void) {
-    // Extinguish the blinding onboard WS2812 LED on boot
+    // Extinguish the onboard WS2812 LED without pulsing motor pins
     ws2812_turn_off_gpio48();
 
     ledc_timer_config_t timer_conf = {
@@ -141,30 +232,28 @@ static void init_motors(void) {
         };
         ledc_channel_config(&ch_conf);
     }
-    ESP_LOGI(TAG, "Motors initialized on GPIO 38, 39, 40, 48.");
+    ESP_LOGI(TAG, "Motors initialized safely on GPIO 38, 39, 40, 48 (duty=0).");
     xTaskCreate(motor_watchdog_task, "motor_wdg", 2048, NULL, 3, NULL);
-}
-
-static uint32_t s_last_drive_ms = 0;
-static bool s_motors_active = false;
-
-static void stop_motors(void) {
-    s_motors_active = false;
-    ledc_set_duty(LEDC_MODE, LEDC_CH_IN1, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CH_IN1);
-    ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CH_IN2);
-    ledc_set_duty(LEDC_MODE, LEDC_CH_IN3, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CH_IN3);
-    ledc_set_duty(LEDC_MODE, LEDC_CH_IN4, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CH_IN4);
 }
 
 static void motor_watchdog_task(void *pvParameters) {
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(150));
+        vTaskDelay(pdMS_TO_TICKS(50));
+        uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
+        // Handle active gesture completion
+        if (s_active_gesture != GESTURE_NONE) {
+            if (now - s_gesture_start_ms >= s_gesture_duration_ms) {
+                ESP_LOGI(TAG, "✅ Trick gesture completed smoothly");
+                s_active_gesture = GESTURE_NONE;
+                stop_motors();
+                oled_set_emotion_by_name("happy");
+            }
+            continue;
+        }
+
+        // Handle normal joystick watchdog timeout (800ms silence)
         if (s_motors_active) {
-            uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
             if (now - s_last_drive_ms > 800) {
                 stop_motors();
                 ESP_LOGW(TAG, "⏱️ Motor watchdog: auto-stopped motors after 800ms silence");
@@ -174,6 +263,11 @@ static void motor_watchdog_task(void *pvParameters) {
 }
 
 static void apply_differential_drive(float x, float y) {
+    // Immediate override: joystick movement instantly aborts any playing trick
+    if (s_active_gesture != GESTURE_NONE) {
+        cancel_active_gesture();
+    }
+
     if (fabsf(x) < 0.05f && fabsf(y) < 0.05f) {
         stop_motors();
         return;
@@ -213,34 +307,7 @@ static void apply_differential_drive(float x, float y) {
              left_pwm, left >= 0 ? "FWD" : "REV",
              right_pwm, right >= 0 ? "FWD" : "REV");
 
-    // Left motor direction (IN1 / IN2)
-    if (left > 0.05f) {
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN1, left_pwm);
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, 0);
-    } else if (left < -0.05f) {
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN1, 0);
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, left_pwm);
-    } else {
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN1, 0);
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN2, 0);
-    }
-
-    // Right motor direction (IN3 / IN4)
-    if (right > 0.05f) {
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN3, right_pwm);
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN4, 0);
-    } else if (right < -0.05f) {
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN3, 0);
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN4, right_pwm);
-    } else {
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN3, 0);
-        ledc_set_duty(LEDC_MODE, LEDC_CH_IN4, 0);
-    }
-
-    ledc_update_duty(LEDC_MODE, LEDC_CH_IN1);
-    ledc_update_duty(LEDC_MODE, LEDC_CH_IN2);
-    ledc_update_duty(LEDC_MODE, LEDC_CH_IN3);
-    ledc_update_duty(LEDC_MODE, LEDC_CH_IN4);
+    set_motor_speeds(left_pwm, left >= 0, right_pwm, right >= 0);
 }
 
 // ==============================================================================
@@ -280,6 +347,45 @@ static void play_connected_chime(void) {
     play_tone(659, 100);
     vTaskDelay(pdMS_TO_TICKS(30));
     play_tone(880, 150);
+}
+
+// Audio Echo Cancellation (AEC) & Half-duplex Ducking state
+static bool s_is_user_speaking = false;
+static uint32_t s_last_speaker_play_ms = 0;
+static uint32_t s_last_interaction_ms = 0;
+static bool s_is_in_thinking_mode = false;
+
+// Synthesize a cute, curious "hmmm..." vocal inflection
+static void play_cute_hmmm_sound(void) {
+    if (!s_i2s_tx_handle) return;
+    s_last_speaker_play_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
+    // Vocal sweep: soft glide 310Hz -> 280Hz -> 430Hz over 450ms with smooth sine envelope
+    const int step_samples = 160; // 10ms at 16kHz
+    int16_t step_buf[step_samples * 2];
+    float phase = 0.0f;
+
+    for (int step = 0; step < 45; step++) {
+        float progress = (float)step / 45.0f;
+        float freq;
+        if (progress < 0.35f) {
+            freq = 310.0f - (30.0f * (progress / 0.35f));
+        } else {
+            freq = 280.0f + (150.0f * ((progress - 0.35f) / 0.65f));
+        }
+        float envelope = sinf((float)M_PI * progress);
+        float vol = envelope * 4500.0f; // Soft, friendly level
+
+        for (int i = 0; i < step_samples; i++) {
+            phase += 2.0f * (float)M_PI * freq / 16000.0f;
+            if (phase > 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+            int16_t sample = (int16_t)(sinf(phase) * vol);
+            step_buf[i * 2]     = sample;
+            step_buf[i * 2 + 1] = sample;
+        }
+        size_t written = 0;
+        i2s_channel_write(s_i2s_tx_handle, step_buf, sizeof(step_buf), &written, pdMS_TO_TICKS(25));
+    }
 }
 
 static esp_err_t init_speaker_audio(void) {
@@ -471,33 +577,295 @@ static httpd_handle_t start_camera_server(void) {
 }
 
 // ==============================================================================
-// 5. WI-FI & SUPABASE HTTP HELPER
+// 5. WI-FI PROVISIONING, NVS FLASH PERSISTENCE & CAPTIVE PORTAL
 // ==============================================================================
 
 static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
 static char s_robot_ip[32] = "127.0.0.1";
+static httpd_handle_t s_prov_httpd = NULL;
+
+static esp_err_t load_wifi_credentials_nvs(void) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE_WIFI, NVS_READONLY, &nvs_handle);
+    if (err == ESP_OK) {
+        size_t ssid_len = sizeof(s_wifi_ssid);
+        size_t pass_len = sizeof(s_wifi_pass);
+        if (nvs_get_str(nvs_handle, NVS_KEY_SSID, s_wifi_ssid, &ssid_len) == ESP_OK && strlen(s_wifi_ssid) > 0) {
+            nvs_get_str(nvs_handle, NVS_KEY_PASS, s_wifi_pass, &pass_len);
+            ESP_LOGI(TAG, "📂 Loaded Wi-Fi credentials from NVS: SSID=[%s]", s_wifi_ssid);
+        } else {
+            s_wifi_ssid[0] = '\0';
+            s_wifi_pass[0] = '\0';
+            ESP_LOGW(TAG, "No Wi-Fi credentials saved in NVS flash. Setup hotspot required.");
+        }
+        nvs_close(nvs_handle);
+        return ESP_OK;
+    }
+    s_wifi_ssid[0] = '\0';
+    s_wifi_pass[0] = '\0';
+    ESP_LOGW(TAG, "No NVS partition found for Wi-Fi. Setup hotspot required.");
+    return err;
+}
+
+static esp_err_t save_wifi_credentials_nvs(const char *ssid, const char *pass) {
+    if (!ssid || strlen(ssid) == 0) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE_WIFI, NVS_READWRITE, &nvs_handle);
+    if (err == ESP_OK) {
+        nvs_set_str(nvs_handle, NVS_KEY_SSID, ssid);
+        nvs_set_str(nvs_handle, NVS_KEY_PASS, pass ? pass : "");
+        err = nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+        strncpy(s_wifi_ssid, ssid, sizeof(s_wifi_ssid) - 1);
+        strncpy(s_wifi_pass, pass ? pass : "", sizeof(s_wifi_pass) - 1);
+        ESP_LOGI(TAG, "💾 Saved new Wi-Fi credentials to NVS: SSID=[%s]", ssid);
+        return err;
+    }
+    ESP_LOGE(TAG, "Failed to open NVS for writing: 0x%x", err);
+    return err;
+}
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        esp_wifi_connect();
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         snprintf(s_robot_ip, sizeof(s_robot_ip), IPSTR, IP2STR(&event->ip_info.ip));
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        ESP_LOGI(TAG, "Connected to Wi-Fi! Robot IP: %s", s_robot_ip);
+        ESP_LOGI(TAG, "🎉 Connected to Wi-Fi! Robot IP: %s", s_robot_ip);
+    }
+}
+
+// Modern, mobile-responsive HTML Captive Portal for LUMI Wi-Fi setup
+static const char PROV_HTML_PAGE[] =
+"<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,user-scalable=no\">"
+"<title>LUMI Wi-Fi Setup</title><style>"
+"*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif}"
+"body{background:#0F172A;color:#F8FAFC;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px}"
+".card{background:#1E293B;border-radius:24px;padding:28px 24px;width:100%;max-width:380px;box-shadow:0 20px 40px rgba(0,0,0,0.5);border:1px solid #334155;text-align:center}"
+".logo{font-size:46px;margin-bottom:8px}"
+"h1{font-size:22px;font-weight:800;color:#FFFFFF;margin-bottom:4px;letter-spacing:-0.3px}"
+"p{font-size:13px;color:#94A3B8;margin-bottom:22px}"
+"label{display:block;text-align:left;font-size:12px;font-weight:700;color:#94A3B8;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px}"
+"select,input{width:100%;padding:13px 14px;background:#0F172A;border:1.5px solid #334155;border-radius:14px;color:#FFF;font-size:15px;margin-bottom:16px;outline:none;transition:border 0.2s}"
+"select:focus,input:focus{border-color:#634AF6}"
+".btn{width:100%;padding:14px;background:#634AF6;color:#FFF;border:none;border-radius:14px;font-size:16px;font-weight:700;cursor:pointer;box-shadow:0 6px 18px rgba(99,74,246,0.45);margin-top:6px}"
+".btn:active{transform:scale(0.98)}"
+".status{margin-top:16px;font-size:13px;font-weight:600;min-height:22px}"
+".success{color:#10B981}"
+".error{color:#EF4444}"
+".scanning{color:#A78BFA}"
+"</style></head><body>"
+"<div class=\"card\">"
+"<div class=\"logo\">🤖</div>"
+"<h1>Connect LUMI</h1>"
+"<p>Select your Hotspot or Wi-Fi network</p>"
+"<label for=\"scanned\">Nearby Networks</label>"
+"<select id=\"scanned\" onchange=\"pickNet(this.value)\"><option value=\"\">Scanning Wi-Fi...</option></select>"
+"<label for=\"ssid\">Network Name (SSID)</label>"
+"<input type=\"text\" id=\"ssid\" placeholder=\"Hotspot / Wi-Fi Name\" autocomplete=\"off\" autocorrect=\"off\">"
+"<label for=\"pass\">Password</label>"
+"<input type=\"password\" id=\"pass\" placeholder=\"Password (leave blank if open)\">"
+"<button class=\"btn\" id=\"subBtn\" onclick=\"saveConfig()\">Connect LUMI</button>"
+"<div class=\"status\" id=\"status\"></div>"
+"</div>"
+"<script>"
+"function pickNet(v){if(v)document.getElementById('ssid').value=v;}"
+"function scan(){"
+"fetch('/scan').then(function(r){return r.json();}).then(function(nets){"
+"var sel=document.getElementById('scanned');sel.innerHTML='<option value=\"\">-- Pick Scanned Network --</option>';"
+"if(nets&&nets.length){nets.forEach(function(n){var o=document.createElement('option');o.value=n.ssid;o.text=n.ssid+' ('+n.rssi+' dBm)';sel.appendChild(o);});}"
+"else{sel.innerHTML='<option value=\"\">No networks found (type below)</option>';}"
+"}).catch(function(){document.getElementById('scanned').innerHTML='<option value=\"\">Type Hotspot Name Below</option>';});}"
+"scan();"
+"function saveConfig(){"
+"var s=document.getElementById('ssid').value.trim();var p=document.getElementById('pass').value;"
+"var st=document.getElementById('status');var btn=document.getElementById('subBtn');"
+"if(!s){st.className='status error';st.innerText='Please enter a Wi-Fi name';return;}"
+"btn.disabled=true;st.className='status scanning';st.innerText='Connecting LUMI to '+s+'...';"
+"fetch('/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:s,pass:p})})"
+".then(function(r){return r.json();}).then(function(){st.className='status success';st.innerText='Saved! Watch LUMI\\'s face for code.';})"
+".catch(function(){st.className='status success';st.innerText='Submitted! Connecting now...';});"
+"}"
+"</script></body></html>";
+
+static esp_err_t prov_index_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, PROV_HTML_PAGE, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t prov_scan_handler(httpd_req_t *req) {
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0,
+        .show_hidden = false
+    };
+    esp_wifi_scan_start(&scan_config, true);
+    uint16_t ap_count = 0;
+    esp_wifi_scan_get_ap_num(&ap_count);
+    if (ap_count > 12) ap_count = 12;
+
+    cJSON *arr = cJSON_CreateArray();
+    if (ap_count > 0) {
+        wifi_ap_record_t *ap_records = malloc(sizeof(wifi_ap_record_t) * ap_count);
+        if (ap_records) {
+            esp_wifi_scan_get_ap_records(&ap_count, ap_records);
+            for (int i = 0; i < ap_count; i++) {
+                if (strlen((char *)ap_records[i].ssid) > 0) {
+                    cJSON *item = cJSON_CreateObject();
+                    cJSON_AddStringToObject(item, "ssid", (char *)ap_records[i].ssid);
+                    cJSON_AddNumberToObject(item, "rssi", ap_records[i].rssi);
+                    cJSON_AddItemToArray(arr, item);
+                }
+            }
+            free(ap_records);
+        }
+    }
+    char *json_str = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    if (json_str) {
+        httpd_resp_send(req, json_str, strlen(json_str));
+        free(json_str);
+    } else {
+        httpd_resp_send(req, "[]", 2);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t prov_connect_handler(httpd_req_t *req) {
+    char buf[256];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *s = cJSON_GetObjectItem(json, "ssid");
+    cJSON *p = cJSON_GetObjectItem(json, "pass");
+    if (!s || !s->valuestring || strlen(s->valuestring) == 0) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing SSID");
+        return ESP_FAIL;
+    }
+
+    const char *new_ssid = s->valuestring;
+    const char *new_pass = p && p->valuestring ? p->valuestring : "";
+
+    save_wifi_credentials_nvs(new_ssid, new_pass);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, "{\"status\":\"ok\",\"message\":\"Connecting to Wi-Fi...\"}", HTTPD_RESP_USE_STRLEN);
+    cJSON_Delete(json);
+
+    // Apply to station and trigger connect
+    wifi_config_t sta_conf = {0};
+    strncpy((char *)sta_conf.sta.ssid, new_ssid, sizeof(sta_conf.sta.ssid) - 1);
+    strncpy((char *)sta_conf.sta.password, new_pass, sizeof(sta_conf.sta.password) - 1);
+
+    ESP_LOGI(TAG, "📡 SoftAP: Switching to user network [%s]...", new_ssid);
+    esp_wifi_disconnect();
+    esp_wifi_set_config(WIFI_IF_STA, &sta_conf);
+    esp_wifi_connect();
+
+    return ESP_OK;
+}
+
+static esp_err_t captive_redirect_handler(httpd_req_t *req) {
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+static httpd_handle_t start_wifi_prov_portal(void) {
+    if (s_prov_httpd) return s_prov_httpd;
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 80;
+    config.ctrl_port = 32770;
+    config.max_open_sockets = 4;
+    config.stack_size = 6144;
+
+    if (httpd_start(&s_prov_httpd, &config) == ESP_OK) {
+        httpd_uri_t index_uri = {
+            .uri = "/",
+            .method = HTTP_GET,
+            .handler = prov_index_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_prov_httpd, &index_uri);
+
+        httpd_uri_t scan_uri = {
+            .uri = "/scan",
+            .method = HTTP_GET,
+            .handler = prov_scan_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_prov_httpd, &scan_uri);
+
+        httpd_uri_t conn_uri = {
+            .uri = "/connect",
+            .method = HTTP_POST,
+            .handler = prov_connect_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_prov_httpd, &conn_uri);
+
+        httpd_uri_t g204_uri = {
+            .uri = "/generate_204",
+            .method = HTTP_GET,
+            .handler = captive_redirect_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_prov_httpd, &g204_uri);
+
+        httpd_uri_t apple_uri = {
+            .uri = "/hotspot-detect.html",
+            .method = HTTP_GET,
+            .handler = captive_redirect_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_prov_httpd, &apple_uri);
+
+        ESP_LOGI(TAG, "🌐 Wi-Fi Provisioning Portal active on http://192.168.4.1:80");
+    }
+    return s_prov_httpd;
+}
+
+static void stop_wifi_prov_portal(void) {
+    if (s_prov_httpd) {
+        httpd_stop(s_prov_httpd);
+        s_prov_httpd = NULL;
+        ESP_LOGI(TAG, "🌐 Wi-Fi Provisioning Portal stopped.");
     }
 }
 
 static void init_wifi(void) {
+    load_wifi_credentials_nvs();
+
     s_wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
+    esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -515,14 +883,24 @@ static void init_wifi(void) {
                                                         NULL,
                                                         &instance_got_ip));
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASS,
+    wifi_config_t wifi_sta_config = {0};
+    strncpy((char *)wifi_sta_config.sta.ssid, s_wifi_ssid, sizeof(wifi_sta_config.sta.ssid) - 1);
+    strncpy((char *)wifi_sta_config.sta.password, s_wifi_pass, sizeof(wifi_sta_config.sta.password) - 1);
+
+    wifi_config_t wifi_ap_config = {
+        .ap = {
+            .ssid = "LUMI-Setup",
+            .ssid_len = strlen("LUMI-Setup"),
+            .channel = 1,
+            .password = "",
+            .max_connection = 4,
+            .authmode = WIFI_AUTH_OPEN
         },
     };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_sta_config));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
@@ -558,8 +936,18 @@ static char* http_post_json(const char *url, const char *json_body) {
 static void on_data_received(const livekit_data_received_t *data, void *ctx) {
     if (!data || !data->payload.bytes || data->payload.size == 0) return;
 
+    // Reset idle timer whenever user interacts with robot
+    s_last_interaction_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    if (s_is_in_thinking_mode) {
+        s_is_in_thinking_mode = false;
+        oled_set_emotion_by_name("happy");
+    }
+
     // 1. Direct binary audio stream over WebRTC data channel (topic "voice_stream")
     if (data->topic && strcmp(data->topic, "voice_stream") == 0) {
+        s_is_user_speaking = true;
+        s_last_speaker_play_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
         if (s_i2s_tx_handle && data->payload.size > 0) {
             // Incoming phone stream is 16-bit 16kHz mono PCM.
             // Duplicate mono into stereo (Left + Right) for MAX98357A I2S DAC with digital gain boost.
@@ -588,6 +976,9 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
     // Legacy binary audio over topic "voice" (safeguard against JSON {"...)
     if (data->topic && strcmp(data->topic, "voice") == 0) {
         if (data->payload.size > 2 && !(data->payload.bytes[0] == '{' && (data->payload.bytes[1] == '"' || data->payload.bytes[1] == '\''))) {
+            s_is_user_speaking = true;
+            s_last_speaker_play_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
             if (s_i2s_tx_handle) {
                 size_t mono_samples = data->payload.size / sizeof(int16_t);
                 if (mono_samples > 0) {
@@ -632,24 +1023,49 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
                 float x = (float)x_item->valuedouble;
                 float y = (float)y_item->valuedouble;
                 apply_differential_drive(x, y);
+                // Reactive Kinematic Gaze: Eyes lead turns and react to drive vector
+                oled_set_gaze_offset(x, -y * 0.4f);
             }
         } else if (strcmp(t->valuestring, "stop") == 0) {
             stop_motors();
+            oled_set_gaze_offset(0.0f, 0.0f);
             ESP_LOGW(TAG, "🛑 EMERGENCY / JOYSTICK STOP EXECUTED");
+        } else if (strcmp(t->valuestring, "play") == 0) {
+            cJSON *name_item = cJSON_GetObjectItem(json, "name");
+            if (name_item && name_item->valuestring) {
+                const char *gname = name_item->valuestring;
+                ESP_LOGI(TAG, "🎭 Trick / gesture requested: %s", gname);
+                if (strcmp(gname, "spin") == 0 || strcmp(gname, "spin_360") == 0) {
+                    start_gesture(GESTURE_SPIN_360);
+                } else if (strcmp(gname, "surveillance") == 0 || strcmp(gname, "surveillance_360") == 0) {
+                    start_gesture(GESTURE_SURVEILLANCE_360);
+                } else if (strcmp(gname, "nod") == 0) {
+                    oled_set_emotion_by_name("happy");
+                } else if (strcmp(gname, "shake") == 0) {
+                    oled_set_emotion_by_name("upset");
+                } else if (strcmp(gname, "dance") == 0) {
+                    oled_set_emotion_by_name("excited");
+                } else if (strcmp(gname, "peekaboo") == 0) {
+                    oled_draw_wink();
+                }
+            }
         } else if (strcmp(t->valuestring, "mic_start") == 0) {
-            ESP_LOGI(TAG, "🎙️ Mic Push-to-Talk active (channel open, silent)");
-            // Silent channel opening - no radio chords
+            s_is_user_speaking = true;
+            s_last_speaker_play_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            ESP_LOGI(TAG, "🎙️ Mic Push-to-Talk active (speaker channel open, local mic muted for AEC)");
         } else if (strcmp(t->valuestring, "mic_stop") == 0) {
-            ESP_LOGI(TAG, "🎙️ Mic Push-to-Talk released (channel closed, silent)");
-            // Silent channel closing - no radio chords
+            s_is_user_speaking = false;
+            ESP_LOGI(TAG, "🎙️ Mic Push-to-Talk released (local mic unmuted)");
         } else if (strcmp(t->valuestring, "emotion") == 0) {
             cJSON *name = cJSON_GetObjectItem(json, "name");
             if (name && name->valuestring) {
                 ESP_LOGI(TAG, "Emote Triggered (silent): %s", name->valuestring);
                 oled_set_emotion_by_name(name->valuestring);
-                // Silent emote: speaker tones removed so eyes animate silently!
             }
         } else if (strcmp(t->valuestring, "voice") == 0) {
+            s_is_user_speaking = true;
+            s_last_speaker_play_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
             // Decodes base64 PCM audio data sent from Walkie-Talkie voice clips
             cJSON *b64_item = cJSON_GetObjectItem(json, "data");
             if (b64_item && b64_item->valuestring && s_i2s_tx_handle) {
@@ -696,6 +1112,23 @@ static void on_data_received(const livekit_data_received_t *data, void *ctx) {
             uint32_t freq = freq_item ? freq_item->valueint : 880;
             uint32_t dur = dur_item ? dur_item->valueint : 200;
             play_tone(freq, dur);
+        } else if (strcmp(t->valuestring, "wifi_config") == 0) {
+            cJSON *s = cJSON_GetObjectItem(json, "ssid");
+            cJSON *p = cJSON_GetObjectItem(json, "pass");
+            if (s && s->valuestring && strlen(s->valuestring) > 0) {
+                const char *new_s = s->valuestring;
+                const char *new_p = p && p->valuestring ? p->valuestring : "";
+                ESP_LOGI(TAG, "📡 Live App: Switching Wi-Fi to [%s]...", new_s);
+                save_wifi_credentials_nvs(new_s, new_p);
+
+                wifi_config_t new_sta = {0};
+                strncpy((char *)new_sta.sta.ssid, new_s, sizeof(new_sta.sta.ssid) - 1);
+                strncpy((char *)new_sta.sta.password, new_p, sizeof(new_sta.sta.password) - 1);
+
+                esp_wifi_disconnect();
+                esp_wifi_set_config(WIFI_IF_STA, &new_sta);
+                esp_wifi_connect();
+            }
         }
     }
     cJSON_Delete(json);
@@ -721,7 +1154,7 @@ static void on_room_state_changed(livekit_connection_state_t state, void *ctx) {
 // Dedicated task for publishing camera frames worldwide over LiveKit WebRTC
 static void video_stream_task(void *pvParameters) {
     (void)pvParameters;
-    ESP_LOGI(TAG, "🎥 Worldwide LiveKit WebRTC Video Stream Task started on Core 1");
+    ESP_LOGI(TAG, "🎥 Worldwide LiveKit WebRTC Video Stream Task started on Core 1 (18 FPS smooth)");
     while (1) {
         if (s_room_connected && s_room_handle) {
             camera_fb_t *fb = NULL;
@@ -740,15 +1173,15 @@ static void video_stream_task(void *pvParameters) {
                     livekit_err_t res = livekit_room_publish_data(s_room_handle, &pub_opts);
                     esp_camera_fb_return(fb);
                     if (res != LIVEKIT_ERR_NONE) {
-                        // SCTP send queue is temporarily full, yield a bit to let it drain cleanly
-                        vTaskDelay(pdMS_TO_TICKS(120));
+                        // SCTP send queue is temporarily full, yield slightly to let it drain cleanly
+                        vTaskDelay(pdMS_TO_TICKS(75));
                     }
                 }
                 xSemaphoreGive(s_camera_mutex);
             }
-            vTaskDelay(pdMS_TO_TICKS(125)); // ~8 FPS for rock-solid stability, zero SCTP queue congestion, and persistent heartbeats
+            vTaskDelay(pdMS_TO_TICKS(55)); // ~18 FPS for buttery smooth real-time video without frame stutter
         } else {
-            vTaskDelay(pdMS_TO_TICKS(200));
+            vTaskDelay(pdMS_TO_TICKS(150));
         }
     }
 }
@@ -758,6 +1191,10 @@ static void video_stream_task(void *pvParameters) {
 // ==============================================================================
 
 void app_main(void) {
+    // 1. Immediately clamp all motor driver pins to LOW with pull-downs enabled.
+    // This prevents ANY motor twitch / 2-3s spin during bootloader, NVS, and camera init.
+    early_clamp_motor_pins();
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -772,16 +1209,44 @@ void app_main(void) {
     oled_start_animation_task();
     oled_draw_eyes(1, 0); // Show friendly neutral eyes on boot
 
+    // Initialize motors immediately so PWM channels hold 0 duty BEFORE camera init starts
+    init_motors();
+
     // Initialize LiveKit SDK
     livekit_system_init();
 
     init_camera();
-    init_motors();
     init_speaker_audio();
     init_wifi();
 
-    ESP_LOGI(TAG, "Waiting for Wi-Fi connection...");
-    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
+    bool need_prov = false;
+    if (strlen(s_wifi_ssid) == 0) {
+        ESP_LOGW(TAG, "No Wi-Fi credentials configured. Launching setup hotspot immediately.");
+        need_prov = true;
+    } else {
+        ESP_LOGI(TAG, "Attempting connection to saved Wi-Fi [%s] (timeout: 12s)...", s_wifi_ssid);
+        EventBits_t conn_bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, false, true, pdMS_TO_TICKS(12000));
+        if ((conn_bits & WIFI_CONNECTED_BIT) == 0) {
+            ESP_LOGW(TAG, "❌ Could not connect to saved Wi-Fi [%s] within 12s", s_wifi_ssid);
+            need_prov = true;
+        }
+    }
+
+    if (need_prov) {
+        ESP_LOGW(TAG, "================================================");
+        ESP_LOGW(TAG, "📡 LAUNCHING LUMI WI-FI SETUP HOTSPOT: [LUMI-Setup]");
+        ESP_LOGW(TAG, "👉 1. Connect phone Wi-Fi to 'LUMI-Setup'");
+        ESP_LOGW(TAG, "👉 2. Open browser: http://192.168.4.1");
+        ESP_LOGW(TAG, "================================================");
+
+        oled_show_wifi_setup_screen("LUMI-Setup");
+        start_wifi_prov_portal();
+
+        // Wait until user connects phone and submits hotspot credentials on captive portal
+        xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
+        ESP_LOGI(TAG, "🎉 Wi-Fi successfully provisioned and connected!");
+        stop_wifi_prov_portal();
+    }
 
     // Start local camera stream server immediately so user can view live video anytime
     start_camera_server();
@@ -889,6 +1354,19 @@ void app_main(void) {
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         hb_ticks++;
+
+        // Cute Idle Personality: When Lumi has been quiet/idle for >20 seconds,
+        // play soft curious "hmmm..." sound and transition eyes to thinking mood
+        uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        if (s_room_connected && !s_motors_active && s_active_gesture == GESTURE_NONE && !s_is_user_speaking) {
+            if (now_ms - s_last_interaction_ms >= 20000 && !s_is_in_thinking_mode) {
+                s_is_in_thinking_mode = true;
+                ESP_LOGI(TAG, "🤔 Lumi idle: playing cute 'hmmm...' sound and thinking animation");
+                oled_set_emotion_by_name("thinking");
+                play_cute_hmmm_sound();
+                s_last_interaction_ms = now_ms - 5000; // Will contemplate again after 25s if still idle
+            }
+        }
 
         // Fast auto-reconnect if LiveKit room connection was lost or dropped (checks every 2 seconds)
         if (!s_room_connected && s_room_handle != NULL && strlen(s_livekit_token) > 0 && (hb_ticks % 2 == 0)) {

@@ -143,6 +143,24 @@
     }
     button.secondary:hover { background: #2B304B; }
 
+    .mini-btn {
+      padding: 4px 8px;
+      font-size: 11px;
+      background: #131627;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+      box-shadow: none;
+      transition: all 0.15s;
+    }
+    .mini-btn:hover {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+      transform: none;
+    }
+
     /* Video Viewport */
     .video-container {
       position: relative;
@@ -241,11 +259,32 @@
 
       <button id="btnRegister" onclick="registerRobot()">Boot & Register Hardware</button>
 
-      <div class="card-title" style="margin-top: 8px;">Simulated Robot OLED Display</div>
-      <div class="oled-screen">
-        <div class="oled-label">PAIRING CODE</div>
-        <div class="oled-code" id="oledCode">------</div>
-        <div class="oled-desc" id="oledDesc">Press "Boot" to start setup</div>
+      <div class="card-title" style="margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
+        <span>Simulated Robot OLED Display</span>
+        <span style="font-size: 10px; color: var(--accent); font-family: monospace;">128x64 SSD1306</span>
+      </div>
+      <div class="oled-screen" id="oledScreenContainer">
+        <div id="oledTextContainer" style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
+          <div class="oled-label">PAIRING CODE</div>
+          <div class="oled-code" id="oledCode">------</div>
+          <div class="oled-desc" id="oledDesc">Press "Boot" to start setup</div>
+        </div>
+        <canvas id="oledEyeCanvas" width="128" height="64" style="width: 256px; height: 128px; image-rendering: pixelated; display: none; border-radius: 4px; box-shadow: 0 0 16px rgba(6, 182, 212, 0.4);"></canvas>
+      </div>
+
+      <div class="oled-quick-emotes" id="oledQuickEmotes" style="margin: 8px 0 12px 0; display: flex; flex-wrap: wrap; gap: 5px; justify-content: center;">
+        <button type="button" class="mini-btn" onclick="simSetEmotion('thinking')">Thinking 🤔</button>
+        <button type="button" class="mini-btn" onclick="simSetEmotion('happy')">Happy</button>
+        <button type="button" class="mini-btn" onclick="simSetEmotion('curious')">Curious</button>
+        <button type="button" class="mini-btn" onclick="simSetEmotion('excited')">Excited</button>
+        <button type="button" class="mini-btn" onclick="simSetEmotion('love')">Love</button>
+        <button type="button" class="mini-btn" onclick="simSetEmotion('sleepy')">Sleepy</button>
+        <button type="button" class="mini-btn" onclick="simSetEmotion('angry')">Angry</button>
+        <button type="button" class="mini-btn" onclick="simSetEmotion('sad')">Sad</button>
+        <button type="button" class="mini-btn" onclick="simTriggerWink()">Wink</button>
+        <button type="button" class="mini-btn" onclick="simTriggerBlink()">Blink</button>
+        <button type="button" class="mini-btn" style="border-color: #38BDF8; color: #38BDF8;" onclick="simExecuteTrick('spin')">360° Spin 🌀</button>
+        <button type="button" class="mini-btn" style="border-color: #A78BFA; color: #A78BFA;" onclick="simExecuteTrick('surveillance')">360° Scan 👀</button>
       </div>
 
       <button id="btnConnectLivekit" class="secondary" onclick="connectLiveKit()" disabled>
@@ -332,6 +371,280 @@
       sleepy: '😴',
       sad: '🥺',
     };
+
+    // ─── Procedural OLED Eye Engine (1:1 with ESP32-S3 Firmware) ───
+    let oledEyesActive = false;
+    let oledMood = 'happy';
+
+    const eyeL = { cx: 38, cy: 32, width: 28, height: 34, radius: 9, topLidH: 0, topLidAngle: 0, bottomLidH: 0, bottomLidAngle: 0, isHeart: false };
+    const eyeR = { cx: 90, cy: 32, width: 28, height: 34, radius: 9, topLidH: 0, topLidAngle: 0, bottomLidH: 0, bottomLidAngle: 0, isHeart: false };
+
+    let gazeX = 0, gazeY = 0, targetGazeX = 0, targetGazeY = 0;
+    let saccadeX = 0, saccadeY = 0, saccadeTimer = 2200, saccadeHold = 0;
+    let blinkState = 0; // 0=idle, 1=closing, 2=closed, 3=opening
+    let blinkTimer = 3000, blinkPhaseMs = 0, blinkProgress = 0;
+    let winkActive = false, winkTimer = 0;
+    let heartbeatPhase = 0;
+
+    function showOledEyesCanvas() {
+      if (!oledEyesActive) {
+        oledEyesActive = true;
+        document.getElementById('oledTextContainer').style.display = 'none';
+        document.getElementById('oledEyeCanvas').style.display = 'block';
+      }
+    }
+
+    function simSetEmotion(emo) {
+      showOledEyesCanvas();
+      setEmotion(emo);
+      oledMood = emo;
+      log(`[OLED PREVIEW] Emotion set to: ${emo}`, 'emote');
+    }
+
+    function simTriggerWink() {
+      showOledEyesCanvas();
+      winkActive = true;
+      winkTimer = 600;
+      log('[OLED PREVIEW] Wink triggered', 'emote');
+    }
+
+    function simTriggerBlink() {
+      showOledEyesCanvas();
+      blinkState = 1;
+      blinkPhaseMs = 0;
+      log('[OLED PREVIEW] Blink triggered', 'emote');
+    }
+
+    function computeOledTargets(mood) {
+      const tl = { cx: 38, cy: 32, width: 28, height: 34, radius: 9, topLidH: 0, topLidAngle: 0, bottomLidH: 0, bottomLidAngle: 0, isHeart: false };
+      const tr = { cx: 90, cy: 32, width: 28, height: 34, radius: 9, topLidH: 0, topLidAngle: 0, bottomLidH: 0, bottomLidAngle: 0, isHeart: false };
+
+      switch (mood) {
+        case 'happy':
+          tl.width = 30; tl.height = 28; tl.radius = 8;
+          tr.width = 30; tr.height = 28; tr.radius = 8;
+          tl.bottomLidH = 0.52; tl.bottomLidAngle = 12;
+          tr.bottomLidH = 0.52; tr.bottomLidAngle = -12;
+          break;
+        case 'curious':
+          tl.width = 29; tl.height = 36; tl.radius = 10; tl.cy = 29;
+          tr.width = 27; tr.height = 28; tr.radius = 6; tr.cy = 33;
+          tr.topLidH = 0.22; tr.topLidAngle = -14;
+          break;
+        case 'sleepy':
+        case 'sleep':
+          tl.width = 28; tl.height = 22; tl.radius = 5; tl.cy = 35;
+          tr.width = 28; tr.height = 22; tr.radius = 5; tr.cy = 35;
+          tl.topLidH = 0.65; tl.topLidAngle = -6;
+          tr.topLidH = 0.65; tr.topLidAngle = 6;
+          tl.bottomLidH = 0.12; tr.bottomLidH = 0.12;
+          break;
+        case 'angry':
+          tl.width = 29; tl.height = 28; tl.radius = 4;
+          tr.width = 29; tr.height = 28; tr.radius = 4;
+          tl.topLidH = 0.45; tl.topLidAngle = -24;
+          tr.topLidH = 0.45; tr.topLidAngle = 24;
+          tl.bottomLidH = 0.15; tr.bottomLidH = 0.15;
+          break;
+        case 'upset':
+          tl.width = 28; tl.height = 20; tl.radius = 5;
+          tr.width = 28; tr.height = 20; tr.radius = 5;
+          tl.topLidH = 0.35; tr.topLidH = 0.35;
+          tl.bottomLidH = 0.35; tr.bottomLidH = 0.35;
+          break;
+        case 'sad':
+          tl.width = 27; tl.height = 30; tl.radius = 7; tl.cy = 34;
+          tr.width = 27; tr.height = 30; tr.radius = 7; tr.cy = 34;
+          tl.topLidH = 0.40; tl.topLidAngle = 18;
+          tr.topLidH = 0.40; tr.topLidAngle = -18;
+          break;
+        case 'love':
+          tl.isHeart = true; tr.isHeart = true;
+          tl.width = 28; tl.height = 28;
+          tr.width = 28; tr.height = 28;
+          break;
+        case 'excited':
+        case 'surprised':
+          tl.width = 31; tl.height = 38; tl.radius = 12;
+          tr.width = 31; tr.height = 38; tr.radius = 12;
+          break;
+        default:
+          break;
+      }
+      return { tl, tr };
+    }
+
+    function lerp(a, b, r) {
+      return a + (b - a) * r;
+    }
+
+    function drawEye(ctx, eye) {
+      ctx.save();
+      if (eye.isHeart) {
+        const r = eye.width * 0.25;
+        ctx.fillStyle = '#06B6D4';
+        ctx.shadowColor = '#06B6D4';
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.arc(eye.cx - r, eye.cy - eye.height * 0.15, r, Math.PI, 0, false);
+        ctx.arc(eye.cx + r, eye.cy - eye.height * 0.15, r, Math.PI, 0, false);
+        ctx.lineTo(eye.cx, eye.cy + eye.height * 0.45);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+        return;
+      }
+
+      const halfW = eye.width / 2;
+      const halfH = eye.height / 2;
+      const topCutY = (eye.cy - halfH) + eye.height * eye.topLidH;
+      const topSlope = Math.tan((eye.topLidAngle * Math.PI) / 180);
+      const botCutY = (eye.cy + halfH) - eye.height * eye.bottomLidH;
+      const botSlope = Math.tan((eye.bottomLidAngle * Math.PI) / 180);
+
+      const leftX = eye.cx - halfW - 2;
+      const rightX = eye.cx + halfW + 2;
+      const yTopLeft = topCutY + topSlope * (leftX - eye.cx);
+      const yTopRight = topCutY + topSlope * (rightX - eye.cx);
+      const yBotLeft = botCutY + botSlope * (leftX - eye.cx);
+      const yBotRight = botCutY + botSlope * (rightX - eye.cx);
+
+      ctx.beginPath();
+      ctx.moveTo(leftX, yTopLeft);
+      ctx.lineTo(rightX, yTopRight);
+      ctx.lineTo(rightX, yBotRight);
+      ctx.lineTo(leftX, yBotLeft);
+      ctx.closePath();
+      ctx.clip();
+
+      ctx.fillStyle = '#06B6D4';
+      ctx.shadowColor = '#06B6D4';
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      if (ctx.roundRect) {
+        ctx.roundRect(eye.cx - halfW, eye.cy - halfH, eye.width, eye.height, eye.radius);
+      } else {
+        ctx.rect(eye.cx - halfW, eye.cy - halfH, eye.width, eye.height);
+      }
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function renderOledLoop() {
+      const canvas = document.getElementById('oledEyeCanvas');
+      if (canvas && oledEyesActive) {
+        const ctx = canvas.getContext('2d');
+        const dt = 30;
+
+        // 1. Blink Machine
+        if (blinkState === 0) {
+          blinkTimer -= dt;
+          if (blinkTimer <= 0) { blinkState = 1; blinkPhaseMs = 0; }
+        } else if (blinkState === 1) {
+          blinkPhaseMs += dt;
+          blinkProgress = blinkPhaseMs / 45;
+          if (blinkProgress >= 1) { blinkProgress = 1; blinkState = 2; blinkPhaseMs = 0; }
+        } else if (blinkState === 2) {
+          blinkPhaseMs += dt;
+          blinkProgress = 1;
+          if (blinkPhaseMs >= 20) { blinkState = 3; blinkPhaseMs = 0; }
+        } else if (blinkState === 3) {
+          blinkPhaseMs += dt;
+          blinkProgress = 1 - (blinkPhaseMs / 75);
+          if (blinkProgress <= 0) {
+            blinkProgress = 0;
+            blinkState = 0;
+            blinkTimer = (Math.random() < 0.25) ? 120 : (2200 + Math.random() * 3000);
+          }
+        }
+
+        // 2. Wink Timer
+        if (winkActive) {
+          winkTimer -= dt;
+          if (winkTimer <= 0) winkActive = false;
+        }
+
+        // 3. Micro-Saccades
+        if (saccadeHold > 0) {
+          saccadeHold -= dt;
+          if (saccadeHold <= 0) {
+            saccadeX = 0; saccadeY = 0;
+            saccadeTimer = 1800 + Math.random() * 2400;
+          }
+        } else {
+          saccadeTimer -= dt;
+          if (saccadeTimer <= 0 && blinkState === 0 && !winkActive) {
+            saccadeX = (Math.floor(Math.random() * 5) - 2);
+            saccadeY = (Math.floor(Math.random() * 3) - 1);
+            saccadeHold = 180 + Math.random() * 140;
+          }
+        }
+
+        // 4. Targets
+        const { tl: targetL, tr: targetR } = computeOledTargets(oledMood);
+
+        if (oledMood === 'love') {
+          heartbeatPhase += 0.22;
+          const pulse = 1.0 + 0.14 * Math.abs(Math.sin(heartbeatPhase));
+          targetL.width *= pulse; targetL.height *= pulse;
+          targetR.width *= pulse; targetR.height *= pulse;
+        }
+
+        gazeX = lerp(gazeX, targetGazeX, 0.22);
+        gazeY = lerp(gazeY, targetGazeY, 0.22);
+        const offX = gazeX + saccadeX;
+        const offY = gazeY + saccadeY;
+
+        targetL.cx += offX; targetL.cy += offY;
+        targetR.cx += offX; targetR.cy += offY;
+
+        if (blinkState !== 0) {
+          targetL.topLidH = blinkProgress;
+          targetR.topLidH = blinkProgress;
+          targetL.height = lerp(targetL.height, 4, blinkProgress);
+          targetR.height = lerp(targetR.height, 4, blinkProgress);
+        }
+
+        if (winkActive) {
+          targetL.topLidH = 1.0;
+          targetL.height = 4;
+          targetR.bottomLidH = 0.52;
+          targetR.bottomLidAngle = -12;
+        }
+
+        const rate = 0.25;
+        eyeL.cx = lerp(eyeL.cx, targetL.cx, rate);
+        eyeL.cy = lerp(eyeL.cy, targetL.cy, rate);
+        eyeL.width = lerp(eyeL.width, targetL.width, rate);
+        eyeL.height = lerp(eyeL.height, targetL.height, rate);
+        eyeL.radius = lerp(eyeL.radius, targetL.radius, rate);
+        eyeL.topLidH = lerp(eyeL.topLidH, targetL.topLidH, rate);
+        eyeL.topLidAngle = lerp(eyeL.topLidAngle, targetL.topLidAngle, rate);
+        eyeL.bottomLidH = lerp(eyeL.bottomLidH, targetL.bottomLidH, rate);
+        eyeL.bottomLidAngle = lerp(eyeL.bottomLidAngle, targetL.bottomLidAngle, rate);
+        eyeL.isHeart = targetL.isHeart;
+
+        eyeR.cx = lerp(eyeR.cx, targetR.cx, rate);
+        eyeR.cy = lerp(eyeR.cy, targetR.cy, rate);
+        eyeR.width = lerp(eyeR.width, targetR.width, rate);
+        eyeR.height = lerp(eyeR.height, targetR.height, rate);
+        eyeR.radius = lerp(eyeR.radius, targetR.radius, rate);
+        eyeR.topLidH = lerp(eyeR.topLidH, targetR.topLidH, rate);
+        eyeR.topLidAngle = lerp(eyeR.topLidAngle, targetR.topLidAngle, rate);
+        eyeR.bottomLidH = lerp(eyeR.bottomLidH, targetR.bottomLidH, rate);
+        eyeR.bottomLidAngle = lerp(eyeR.bottomLidAngle, targetR.bottomLidAngle, rate);
+        eyeR.isHeart = targetR.isHeart;
+
+        // Render to Canvas
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, 128, 64);
+
+        drawEye(ctx, eyeL);
+        drawEye(ctx, eyeR);
+      }
+    }
+
+    setInterval(renderOledLoop, 1000 / 33);
 
     // ─── 1. Register / Pair Robot ─────────────────────────────
     async function registerRobot() {
@@ -533,6 +846,10 @@
         left = Math.max(-100, Math.min(100, left));
         right = Math.max(-100, Math.min(100, right));
 
+        // Steer OLED eyes with joystick
+        targetGazeX = x * 9.0;
+        targetGazeY = -y * 5.0;
+
         document.getElementById('leftMotorVal').innerText = `${left}%`;
         document.getElementById('rightMotorVal').innerText = `${right}%`;
         document.getElementById('leftMotorBar').style.width = `${Math.abs(left)}%`;
@@ -540,16 +857,60 @@
 
         log(`[DRIVE] x: ${x.toFixed(2)}, y: ${y.toFixed(2)} | L: ${left}%, R: ${right}%`, 'drive');
       } else if (msg.t === 'stop') {
+        targetGazeX = 0;
+        targetGazeY = 0;
         document.getElementById('leftMotorVal').innerText = '0%';
         document.getElementById('rightMotorVal').innerText = '0%';
         document.getElementById('leftMotorBar').style.width = '0%';
         document.getElementById('rightMotorBar').style.width = '0%';
         log('[STOP] Emergency Stop or Joystick released', 'stop');
       } else if (msg.t === 'emotion') {
-        setEmotion(msg.name);
-        log(`[EMOTION] Robot face set to: ${msg.name}`, 'emote');
+        simSetEmotion(msg.name);
       } else if (msg.t === 'play') {
-        log(`[GESTURE] Executing gesture: ${msg.name}`, 'emote');
+        simExecuteTrick(msg.name);
+      }
+    }
+
+    function simExecuteTrick(gesture) {
+      log(`[GESTURE] Executing trick: ${gesture}`, 'emote');
+      if (gesture === 'spin' || gesture === 'spin_360') {
+        simSetEmotion('excited');
+        document.getElementById('leftMotorVal').innerText = '85% (FWD)';
+        document.getElementById('rightMotorVal').innerText = '-85% (REV)';
+        document.getElementById('leftMotorBar').style.width = '85%';
+        document.getElementById('rightMotorBar').style.width = '85%';
+        log('🌀 Trick: Executing 360 Spin (fast turn)', 'drive');
+        setTimeout(() => {
+          document.getElementById('leftMotorVal').innerText = '0%';
+          document.getElementById('rightMotorVal').innerText = '0%';
+          document.getElementById('leftMotorBar').style.width = '0%';
+          document.getElementById('rightMotorBar').style.width = '0%';
+          simSetEmotion('happy');
+          log('✅ 360 Spin trick complete', 'drive');
+        }, 950);
+      } else if (gesture === 'surveillance' || gesture === 'surveillance_360') {
+        simSetEmotion('curious');
+        document.getElementById('leftMotorVal').innerText = '28% (FWD)';
+        document.getElementById('rightMotorVal').innerText = '-28% (REV)';
+        document.getElementById('leftMotorBar').style.width = '28%';
+        document.getElementById('rightMotorBar').style.width = '28%';
+        log('👀 Trick: Executing 360 Surveillance Scan (panoramic)', 'drive');
+        setTimeout(() => {
+          document.getElementById('leftMotorVal').innerText = '0%';
+          document.getElementById('rightMotorVal').innerText = '0%';
+          document.getElementById('leftMotorBar').style.width = '0%';
+          document.getElementById('rightMotorBar').style.width = '0%';
+          simSetEmotion('happy');
+          log('✅ 360 Surveillance scan complete', 'drive');
+        }, 4800);
+      } else if (gesture === 'nod') {
+        simSetEmotion('happy');
+      } else if (gesture === 'shake') {
+        simSetEmotion('angry');
+      } else if (gesture === 'dance') {
+        simSetEmotion('excited');
+      } else if (gesture === 'peekaboo') {
+        simTriggerWink();
       }
     }
 

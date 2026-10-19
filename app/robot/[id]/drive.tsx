@@ -6,78 +6,78 @@
  * Emotions & Gestures drawer, live telemetry HUD, and End Session flow.
  */
 
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { VideoView } from '@livekit/react-native';
 import {
-  View,
-  Text,
-  Image,
-  StyleSheet,
-  Pressable,
-  PanResponder,
-  Modal,
-  ScrollView,
-  Platform,
-  PermissionsAndroid,
-  BackHandler,
-} from 'react-native';
-import * as Haptics from 'expo-haptics';
-import {
-  useAudioStream,
   AudioModule,
   setAudioModeAsync,
+  useAudioStream,
 } from 'expo-audio';
+import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withSpring,
-  withRepeat,
-  withSequence,
-  withTiming,
-} from 'react-native-reanimated';
-import { useTranslation } from 'react-i18next';
 import {
-  ArrowLeft,
-  PhoneOff,
   BatteryMedium,
-  Wifi,
-  Mic,
-  MicOff,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Eye,
+  Heart,
+  Laugh,
   Lock,
-  Unlock,
-  AlertOctagon,
+  Maximize2,
+  Mic,
+  Moon,
+  PhoneOff,
+  RefreshCw,
   Smile,
   Sparkles,
   Video,
-  ChevronUp,
+  Wifi,
   X,
-  RefreshCw,
-  Heart,
-  Eye,
   Zap,
-  Moon,
-  Laugh,
 } from 'lucide-react-native';
-import { useTheme } from '../../../src/theme';
-import { spacing, radius, robotColors } from '../../../src/theme/tokens';
-import { VideoView } from '@livekit/react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
-  robotService,
-  liveService,
-  controlChannel,
-  sessionService,
-  subscribeToRobotVideoTrack,
-  subscribeToCloudVideoFrame,
-  setRobotMicrophone,
-} from '../../../src/services';
+  BackHandler,
+  Image,
+  Modal,
+  PanResponder,
+  PermissionsAndroid,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import Svg, { Circle as SvgCircle, Path as SvgPath } from 'react-native-svg';
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withSequence,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import type { Emotion } from '../../../src/components/RobotFace';
 import { showAlert } from '../../../src/features/dialog/dialogStore';
+import {
+  controlChannel,
+  liveService,
+  robotService,
+  sessionService,
+  setRobotMicrophone,
+  subscribeToCloudVideoFrame,
+  subscribeToRobotVideoTrack,
+} from '../../../src/services';
+import { spacing } from '../../../src/theme/tokens';
+import type { ConnectionState, Robot, Telemetry } from '../../../src/types';
 import { haptics } from '../../../src/utils/haptics';
-import { RobotFace, type Emotion } from '../../../src/components/RobotFace';
-import type { Robot, ConnectionState, Telemetry } from '../../../src/types';
 
-const JOYSTICK_RADIUS = 70;
-const PUCK_RADIUS = 30;
+const JOYSTICK_RADIUS = 98;
+const PUCK_RADIUS = 38;
 const MAX_DRAG = JOYSTICK_RADIUS - PUCK_RADIUS;
 
 const EMOTIONS_LIST: { name: Emotion; label: string; Icon: any }[] = [
@@ -90,9 +90,10 @@ const EMOTIONS_LIST: { name: Emotion; label: string; Icon: any }[] = [
 ];
 
 const GESTURES_LIST = [
+  { name: 'spin', label: '360° Spin' },
+  { name: 'surveillance', label: '360° Surveillance' },
   { name: 'nod', label: 'Nod Yes' },
   { name: 'shake', label: 'Shake No' },
-  { name: 'spin', label: 'Spin 360' },
   { name: 'dance', label: 'Wiggle Dance' },
   { name: 'peekaboo', label: 'Peekaboo' },
 ];
@@ -101,12 +102,14 @@ interface DoubleBufferedCameraFeedProps {
   videoTrack: any;
   cameraStreamUrl: string | null;
   onHasCloudFrameChange?: (hasFrame: boolean) => void;
+  connectionState?: ConnectionState;
 }
 
 const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
   videoTrack,
   cameraStreamUrl,
   onHasCloudFrameChange,
+  connectionState,
 }: DoubleBufferedCameraFeedProps) {
   // Dual-slot ping-pong buffer ensures 0% flicker:
   // Slot A and Slot B alternate so the active frame remains 100% visible while the new frame loads.
@@ -115,6 +118,18 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
   const [activeSlot, setActiveSlot] = useState<'A' | 'B'>('A');
   const activeSlotRef = useRef<'A' | 'B'>('A');
   const hasInitialFrameRef = useRef<boolean>(false);
+  const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clean reset on reconnect so video feed never freezes on stale frame
+  useEffect(() => {
+    if (connectionState === 'connecting' || connectionState === 'reconnecting') {
+      hasInitialFrameRef.current = false;
+      if (fallbackTimerRef.current) {
+        clearTimeout(fallbackTimerRef.current);
+        fallbackTimerRef.current = null;
+      }
+    }
+  }, [connectionState]);
 
   useEffect(() => {
     let mounted = true;
@@ -133,11 +148,24 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
         }
 
         // Ping-pong: stage the next frame into the background slot
-        if (activeSlotRef.current === 'A') {
+        const targetSlot = activeSlotRef.current === 'A' ? 'B' : 'A';
+        if (targetSlot === 'B') {
           setFrameB(uri);
         } else {
           setFrameA(uri);
         }
+
+        // Auto-swap watchdog: if React Native Image onLoad drops or delays,
+        // force swap within 70ms so consecutive frames never get blocked behind a stale slot
+        if (fallbackTimerRef.current) {
+          clearTimeout(fallbackTimerRef.current);
+        }
+        fallbackTimerRef.current = setTimeout(() => {
+          if (mounted) {
+            activeSlotRef.current = targetSlot;
+            setActiveSlot(targetSlot);
+          }
+        }, 70);
       } else {
         // If stream momentarily drops or reconnects, keep last frame on screen
         // instead of flashing completely blank/black
@@ -147,16 +175,28 @@ const DoubleBufferedCameraFeed = React.memo(function DoubleBufferedCameraFeed({
 
     return () => {
       mounted = false;
+      if (fallbackTimerRef.current) {
+        clearTimeout(fallbackTimerRef.current);
+        fallbackTimerRef.current = null;
+      }
       unsub();
     };
   }, [onHasCloudFrameChange]);
 
   const handleFrameALoad = () => {
+    if (fallbackTimerRef.current) {
+      clearTimeout(fallbackTimerRef.current);
+      fallbackTimerRef.current = null;
+    }
     activeSlotRef.current = 'A';
     setActiveSlot('A');
   };
 
   const handleFrameBLoad = () => {
+    if (fallbackTimerRef.current) {
+      clearTimeout(fallbackTimerRef.current);
+      fallbackTimerRef.current = null;
+    }
     activeSlotRef.current = 'B';
     setActiveSlot('B');
   };
@@ -228,8 +268,6 @@ export default function DriveScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { theme } = useTheme();
-  const colors = theme.colors;
   const { t } = useTranslation();
 
   const [robot, setRobot] = useState<Robot | null>(null);
@@ -276,6 +314,10 @@ export default function DriveScreen() {
       const ok = await ensureMicrophonePermission();
       if (ok && active) {
         try {
+          await setAudioModeAsync({
+            playsInSilentMode: true,
+            allowsRecording: true,
+          });
           await audioStream.start();
         } catch (err) {
           console.warn('[PTT] AudioStream initial start warning:', err);
@@ -287,7 +329,7 @@ export default function DriveScreen() {
       active = false;
       try {
         audioStream.stop();
-      } catch {}
+      } catch { }
     };
   }, [audioStream]);
 
@@ -311,7 +353,7 @@ export default function DriveScreen() {
 
   const handleBackPress = useCallback(() => {
     controlChannel.stopDriving();
-    liveService.disconnect().catch(() => {});
+    liveService.disconnect().catch(() => { });
     router.back();
   }, [router]);
 
@@ -378,17 +420,17 @@ export default function DriveScreen() {
   const startAudioCapture = async (): Promise<boolean> => {
     const ok = await ensureMicrophonePermission();
     if (!ok) return false;
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => { });
     setIsTalking(true);
     // Ensure stream is active if not already
     try {
       await audioStream.start();
-    } catch {}
+    } catch { }
     return true;
   };
 
   const stopAudioCapture = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => { });
     setIsTalking(false);
   };
 
@@ -500,7 +542,7 @@ export default function DriveScreen() {
           Number((y * speedMultiplierRef.current).toFixed(2)),
         );
       }
-    }, 75);
+    }, 28);
   }, []);
 
   const stopDriveLoop = useCallback(() => {
@@ -578,9 +620,9 @@ export default function DriveScreen() {
 
         startDriveLoop();
 
-        // Throttle gesture move events to 75ms to avoid queue saturation on high-Hz touchscreens
+        // Throttle gesture move events to 25ms to achieve zero-lag snappy response (40Hz)
         const now = Date.now();
-        if (now - lastDriveSendTimeRef.current >= 75) {
+        if (now - lastDriveSendTimeRef.current >= 25) {
           lastDriveSendTimeRef.current = now;
           controlChannel.startDriving(
             Number((normalizedX * speedMultiplierRef.current).toFixed(2)),
@@ -691,269 +733,249 @@ export default function DriveScreen() {
     return `${mins}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  const faceColor =
-    (robotColors as Record<string, string>)[robot?.color || 'violet'] ||
-    robotColors.violet;
-
   return (
-    <View style={[styles.container, { backgroundColor: '#090A0F' }]}>
-      {/* ── Top HUD Bar ── */}
-      <View style={[styles.topHud, { paddingTop: insets.top + spacing.xs }]}>
-        {/* Robot & Emotion preview */}
-        <View style={styles.hudLeft}>
+    <View style={styles.container}>
+      {/* ── Top Header Bar ── */}
+      <View style={[styles.topHud, { paddingTop: insets.top + 8 }]}>
+        <View style={styles.headerLeftGroup}>
+          {/* Back Circular Button */}
           <Pressable
             onPress={handleBackPress}
-            hitSlop={10}
-            style={styles.backBtn}
+            hitSlop={8}
+            style={styles.circleIconBtn}
           >
-            <ArrowLeft size={22} color="#FFFFFF" />
+            <ChevronLeft size={22} color="#1E293B" />
           </Pressable>
-          <View style={[styles.miniFaceWrap, { backgroundColor: faceColor + '2A' }]}>
-            <RobotFace size={26} color={faceColor} emotion={activeEmotion} />
+
+          {/* Avatar with purple robot smile */}
+          <View style={styles.avatarWrap}>
+            <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+              <SvgCircle cx={7.5} cy={8.5} r={1.6} fill="#634AF6" />
+              <SvgCircle cx={16.5} cy={8.5} r={1.6} fill="#634AF6" />
+              <SvgPath
+                d="M8 14.5 C9.5 17.5 14.5 17.5 16 14.5"
+                stroke="#634AF6"
+                strokeWidth={2}
+                strokeLinecap="round"
+              />
+            </Svg>
           </View>
-          <View>
-            <Text style={styles.robotHudName}>{robot?.name || 'LUMI'}</Text>
+
+          {/* Robot Title & Live Indicator */}
+          <View style={styles.titleColumn}>
+            <Text style={styles.robotHudName}>{(robot?.name || 'LUMI').toUpperCase()}</Text>
             <View style={styles.liveBadgeRow}>
               <View style={styles.liveDot} />
-              <Text style={styles.liveText}>LIVE</Text>
-              <Text style={styles.timerText}>{formatTimer(elapsedSeconds)}</Text>
+              <Text style={styles.liveText}>Live · {formatTimer(elapsedSeconds)}</Text>
             </View>
           </View>
         </View>
 
-        {/* Telemetry stats */}
-        <View style={styles.hudRight}>
-          <View style={styles.telemetryTag}>
-            <Wifi size={13} color="#22C55E" />
-            <Text style={styles.telemetryTagText}>{telemetry.latencyMs}ms</Text>
-          </View>
-
-          <View style={styles.telemetryTag}>
-            <BatteryMedium
-              size={14}
-              color={telemetry.batteryPercent < 20 ? '#EF4444' : '#E2E8F0'}
-            />
-            <Text
-              style={[
-                styles.telemetryTagText,
-                telemetry.batteryPercent < 20 && { color: '#EF4444' },
-              ]}
-            >
-              {telemetry.batteryPercent}%
-            </Text>
-          </View>
-
-          {/* End Call Button */}
-          <Pressable
-            onPress={handleConfirmEndSession}
-            style={styles.endBtn}
-            hitSlop={8}
-          >
-            <PhoneOff size={18} color="#FFFFFF" />
-          </Pressable>
-        </View>
+        {/* End Call Circular Button */}
+        <Pressable
+          onPress={handleConfirmEndSession}
+          style={styles.endCallBtn}
+          hitSlop={8}
+        >
+          <PhoneOff size={20} color="#DC2626" />
+        </Pressable>
       </View>
 
       {/* ── Status Banner (if weak or reconnecting) ── */}
       {connectionState === 'weak' && (
-        <View style={[styles.statusBanner, { backgroundColor: '#EAB308' }]}>
-          <Text style={styles.statusBannerText}>
+        <View style={[styles.statusBanner, { backgroundColor: '#FEF08A' }]}>
+          <Text style={[styles.statusBannerText, { color: '#854D0E' }]}>
             {t('live.weakConnection', 'Weak connection — video may lag')}
           </Text>
         </View>
       )}
 
       {connectionState === 'reconnecting' && (
-        <View style={[styles.statusBanner, { backgroundColor: '#F97316' }]}>
-          <RefreshCw size={14} color="#FFF" style={{ marginRight: 6 }} />
-          <Text style={styles.statusBannerText}>
+        <View style={[styles.statusBanner, { backgroundColor: '#FED7AA' }]}>
+          <RefreshCw size={14} color="#C2410C" style={{ marginRight: 6 }} />
+          <Text style={[styles.statusBannerText, { color: '#C2410C' }]}>
             {t('live.reconnecting', 'Reconnecting to LUMI…')}
           </Text>
         </View>
       )}
 
-      {/* ── Robot Cockpit: Native 4:3 Camera Viewport directly under Top HUD ── */}
-      <View style={styles.cameraViewport}>
-        <DoubleBufferedCameraFeed
-          videoTrack={videoTrack}
-          cameraStreamUrl={cameraStreamUrl}
-          onHasCloudFrameChange={setHasCloudFeed}
-        />
-
-        {/* Bottom stream indicators */}
-        <View style={styles.viewportOverlayBottom}>
-          <View style={styles.videoQualityTag}>
-            <Video size={12} color="#94A3B8" />
-            <Text style={styles.videoQualityText}>
-              {hasCloudFeed || videoTrack
-                ? 'LiveKit Cloud WebRTC (Worldwide)'
-                : cameraStreamUrl
-                ? `OV3660 HD Stream (${cameraStreamUrl}/stream)`
-                : 'LUMI Robot Video'}
-            </Text>
+      {/* ── Camera Viewport Card ── */}
+      <View style={styles.cameraViewportCard}>
+        {/* Badges on Top-Left */}
+        <View style={styles.cameraBadgesRow}>
+          <View style={styles.badgePill}>
+            <Wifi size={14} color="#10B981" />
+            <Text style={styles.badgeText}>{telemetry.latencyMs || 40} ms</Text>
           </View>
-          <Text style={styles.timestampOverlay}>
-            {new Date().toLocaleTimeString()}
-          </Text>
+          <View style={styles.badgePill}>
+            <BatteryMedium size={15} color="#0F172A" />
+            <Text style={styles.badgeText}>{telemetry.batteryPercent || 90}%</Text>
+          </View>
         </View>
 
-        {/* Connecting overlay */}
-        {connectionState === 'connecting' && (
-          <View style={styles.connectingOverlay}>
-            <RobotFace size={60} color={faceColor} emotion="curious" />
-            <Text style={styles.connectingText}>
-              {t('live.findingLumi', 'Connecting to LUMI Cloud…')}
-            </Text>
+        {/* Camera Feed or Placeholder */}
+        {hasCloudFeed || videoTrack || cameraStreamUrl ? (
+          <DoubleBufferedCameraFeed
+            videoTrack={videoTrack}
+            cameraStreamUrl={cameraStreamUrl}
+            onHasCloudFrameChange={setHasCloudFeed}
+            connectionState={connectionState}
+          />
+        ) : (
+          <View style={styles.cameraPlaceholder}>
+            <Video size={36} color="#64748B" />
+            <Text style={styles.cameraPlaceholderText}>Live camera view</Text>
           </View>
         )}
+
+        {/* Fullscreen Button on Bottom-Right */}
+        <Pressable
+          style={styles.fullscreenBtn}
+          hitSlop={8}
+          onPress={() => {
+            haptics.selection();
+          }}
+        >
+          <Maximize2 size={18} color="#1E293B" />
+        </Pressable>
       </View>
 
-      {/* ── Control Console Area ── */}
+      {/* ── Lower Control Sheet ── */}
       <View
         style={[
-          styles.controlsArea,
-          { paddingBottom: Math.max(insets.bottom, 16) + spacing.sm },
+          styles.bottomSheet,
+          { paddingBottom: Math.max(insets.bottom, 16) + 12 },
         ]}
       >
-        {/* Middle quick tool row: Speed selector, Emergency stop, Emotes button */}
-        <View style={styles.toolRow}>
-          {/* Speed selector */}
-          <View style={styles.speedSelector}>
+        {/* Sheet Top Bar: Speed Selector & Emotes */}
+        <View style={styles.sheetTopRow}>
+          {/* Speed Selector Pill */}
+          <View style={styles.speedSelectorPill}>
             {[
-              { val: 0.5, label: '0.5x' },
-              { val: 1.0, label: '1x' },
-              { val: 1.5, label: '1.5x' },
-            ].map(({ val, label }) => (
-              <Pressable
-                key={val}
-                onPress={() => {
-                  haptics.selection();
-                  setSpeedMultiplier(val);
-                }}
-                style={[
-                  styles.speedChip,
-                  speedMultiplier === val && styles.speedChipActive,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.speedChipText,
-                    speedMultiplier === val && styles.speedChipTextActive,
-                  ]}
+              { val: 0.5, label: '0.5×' },
+              { val: 1.0, label: '1×' },
+              { val: 1.5, label: '1.5×' },
+            ].map(({ val, label }) => {
+              const isActive = speedMultiplier === val;
+              return (
+                <Pressable
+                  key={val}
+                  onPress={() => {
+                    haptics.selection();
+                    setSpeedMultiplier(val);
+                  }}
+                  style={[styles.speedOption, isActive && styles.speedOptionActive]}
                 >
-                  {label}
-                </Text>
-              </Pressable>
-            ))}
+                  <Text
+                    style={[
+                      styles.speedOptionText,
+                      isActive && styles.speedOptionTextActive,
+                    ]}
+                  >
+                    {label}
+                  </Text>
+                </Pressable>
+              );
+            })}
           </View>
 
-          {/* Emergency Stop Button */}
-          <Pressable
-            onPress={handleEmergencyStop}
-            style={styles.emergencyBtn}
-          >
-            <AlertOctagon size={18} color="#FFF" />
-            <Text style={styles.emergencyText}>STOP</Text>
-          </Pressable>
-
-          {/* Emotions & Gestures trigger */}
+          {/* Emotes Trigger Pill */}
           <Pressable
             onPress={() => setShowDrawer(true)}
-            style={styles.emotesDrawerBtn}
+            style={styles.emotesPillBtn}
           >
-            <Smile size={18} color="#A78BFA" />
-            <Text style={styles.emotesDrawerText}>Emotes</Text>
-            <ChevronUp size={16} color="#A78BFA" />
+            <Smile size={19} color="#634AF6" />
+            <Text style={styles.emotesPillText}>Emotes</Text>
+            <ChevronUp size={16} color="#475569" />
           </Pressable>
         </View>
 
-        {/* ── Lower Area: Joystick & PTT Mic ── */}
-        <View style={styles.bottomControls}>
-          {/* Virtual Joystick */}
-          <View style={styles.joystickContainer}>
+        {/* Console Driving Controls: Left Joystick, Right Actions */}
+        <View style={styles.consoleRow}>
+          {/* Left Column: Virtual Joystick */}
+          <View style={styles.joystickColumn}>
             <View style={styles.joystickBase} {...panResponder.panHandlers}>
-              {/* Radial guides */}
-              <View style={styles.guideRing} />
-              <View style={styles.crosshairH} />
-              <View style={styles.crosshairV} />
+              {/* Directional Chevrons */}
+              <ChevronUp size={24} color="#94A3B8" style={styles.arrowTop} />
+              <ChevronDown size={24} color="#94A3B8" style={styles.arrowBottom} />
+              <ChevronLeft size={24} color="#94A3B8" style={styles.arrowLeft} />
+              <ChevronRight size={24} color="#94A3B8" style={styles.arrowRight} />
 
-              {/* Draggable Puck */}
-              <Animated.View style={[styles.joystickPuck, animatedPuckStyle]}>
-                <View style={styles.puckDot} />
-              </Animated.View>
+              {/* Draggable Purple Puck */}
+              <Animated.View style={[styles.joystickPuck, animatedPuckStyle]} />
             </View>
-            <Text style={styles.controlHint}>DRIVE</Text>
+            <Text style={styles.columnLabel}>Drive</Text>
           </View>
 
-          {/* Push-to-Talk (PTT) Mic Button */}
-          <View style={styles.pttContainer}>
-            <View style={styles.pttButtonWrapper}>
-              <Animated.View
-                style={[
-                  styles.pttWavePulse,
-                  { backgroundColor: colors.primary },
-                  animatedWaveStyle,
-                ]}
-              />
-
+          {/* Right Column: Stop & Hold to talk */}
+          <View style={styles.actionsColumn}>
+            {/* Red Stop Button */}
+            <View style={styles.actionItem}>
               <Pressable
-                onPressIn={handleStartTalking}
-                onPressOut={handleStopTalking}
-                pressRetentionOffset={{ top: 30, bottom: 30, left: 30, right: 30 }}
-                hitSlop={10}
-                style={[
-                  styles.pttMainBtn,
-                  {
-                    backgroundColor:
-                      isTalking || isMicLocked ? colors.primary : '#1E293B',
-                    borderColor:
-                      isTalking || isMicLocked ? colors.primary : '#334155',
-                  },
-                ]}
+                onPress={handleEmergencyStop}
+                style={styles.stopCircleBtn}
               >
-                {isTalking || isMicLocked ? (
-                  <Mic size={32} color="#FFF" />
-                ) : (
-                  <MicOff size={32} color="#94A3B8" />
-                )}
+                <View style={styles.stopInnerSquare} />
               </Pressable>
-
-              {/* Lock Toggle Button */}
-              <Pressable
-                onPress={async () => {
-                  if (!isMicLocked) {
-                    const ok = await startAudioCapture();
-                    if (ok) {
-                      setIsMicLocked(true);
-                    }
-                  } else {
-                    setIsMicLocked(false);
-                    stopAudioCapture();
-                  }
-                }}
-                style={[
-                  styles.lockBtn,
-                  {
-                    backgroundColor: isMicLocked ? colors.primary : '#1E293B',
-                  },
-                ]}
-                hitSlop={6}
-              >
-                {isMicLocked ? (
-                  <Lock size={12} color="#FFF" />
-                ) : (
-                  <Unlock size={12} color="#94A3B8" />
-                )}
-              </Pressable>
+              <Text style={styles.stopLabel}>Stop</Text>
             </View>
 
-            <Text style={styles.controlHint}>
-              {isMicLocked
-                ? t('live.micLocked', 'MIC ON')
-                : isTalking
-                ? 'TALKING…'
-                : t('live.pushToTalk', 'HOLD TO TALK')}
-            </Text>
+            {/* Purple Mic Button with Lock Toggle */}
+            <View style={styles.actionItem}>
+              <View style={styles.micBtnWrapper}>
+                <Animated.View
+                  style={[
+                    styles.pttWavePulse,
+                    { backgroundColor: '#634AF6' },
+                    animatedWaveStyle,
+                  ]}
+                />
+
+                <Pressable
+                  onPressIn={handleStartTalking}
+                  onPressOut={handleStopTalking}
+                  pressRetentionOffset={{ top: 30, bottom: 30, left: 30, right: 30 }}
+                  hitSlop={10}
+                  style={[
+                    styles.micMainBtn,
+                    (isTalking || isMicLocked) && styles.micMainBtnActive,
+                  ]}
+                >
+                  <Mic size={38} color="#FFFFFF" />
+                </Pressable>
+
+                {/* Lock Toggle Badge */}
+                <Pressable
+                  onPress={async () => {
+                    if (!isMicLocked) {
+                      const ok = await startAudioCapture();
+                      if (ok) {
+                        setIsMicLocked(true);
+                      }
+                    } else {
+                      setIsMicLocked(false);
+                      stopAudioCapture();
+                    }
+                  }}
+                  style={styles.micLockBadge}
+                  hitSlop={6}
+                >
+                  <Lock
+                    size={14}
+                    color={isMicLocked ? '#634AF6' : '#64748B'}
+                    strokeWidth={2.2}
+                  />
+                </Pressable>
+              </View>
+
+              <Text style={styles.columnLabel}>
+                {isMicLocked
+                  ? t('live.micLocked', 'MIC ON')
+                  : isTalking
+                    ? 'Talking…'
+                    : t('live.pushToTalk', 'Hold to talk')}
+              </Text>
+            </View>
           </View>
         </View>
       </View>
@@ -972,7 +994,7 @@ export default function DriveScreen() {
           <Pressable style={styles.drawerCard} onPress={(e) => e.stopPropagation()}>
             <View style={styles.drawerHeader}>
               <View style={styles.drawerHeaderLeft}>
-                <Sparkles size={20} color={colors.primary} />
+                <Sparkles size={20} color="#634AF6" />
                 <Text style={styles.drawerTitle}>Emotions & Gestures</Text>
               </View>
               <Pressable
@@ -980,7 +1002,7 @@ export default function DriveScreen() {
                 hitSlop={8}
                 style={styles.closeDrawerBtn}
               >
-                <X size={20} color="#94A3B8" />
+                <X size={20} color="#64748B" />
               </Pressable>
             </View>
 
@@ -1001,12 +1023,12 @@ export default function DriveScreen() {
                     >
                       <Icon
                         size={20}
-                        color={isCurrent ? colors.primary : '#94A3B8'}
+                        color={isCurrent ? '#634AF6' : '#64748B'}
                       />
                       <Text
                         style={[
                           styles.drawerEmoteText,
-                          isCurrent && { color: colors.primary, fontWeight: '700' },
+                          isCurrent && { color: '#634AF6', fontWeight: '700' },
                         ]}
                       >
                         {label}
@@ -1016,18 +1038,31 @@ export default function DriveScreen() {
                 })}
               </View>
 
-              {/* Gestures */}
+              {/* Gestures & Tricks */}
               <Text style={styles.drawerSectionLabel}>GESTURES & TRICKS</Text>
               <View style={styles.drawerGesturesGrid}>
-                {GESTURES_LIST.map(({ name, label }) => (
-                  <Pressable
-                    key={name}
-                    onPress={() => handleSendGesture(name)}
-                    style={styles.drawerGestureBtn}
-                  >
-                    <Text style={styles.drawerGestureText}>{label}</Text>
-                  </Pressable>
-                ))}
+                {GESTURES_LIST.map(({ name, label }) => {
+                  const isTrick = name === 'spin' || name === 'surveillance';
+                  return (
+                    <Pressable
+                      key={name}
+                      onPress={() => handleSendGesture(name)}
+                      style={[
+                        styles.drawerGestureBtn,
+                        isTrick && styles.drawerTrickBtn,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.drawerGestureText,
+                          isTrick && styles.drawerTrickText,
+                        ]}
+                      >
+                        {label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
               </View>
             </ScrollView>
           </Pressable>
@@ -1040,44 +1075,55 @@ export default function DriveScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#F3F4F9',
   },
   topHud: {
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.sm,
+    paddingHorizontal: 20,
+    paddingBottom: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#0F172A',
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
+    backgroundColor: 'transparent',
   },
-  hudLeft: {
+  headerLeftGroup: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: 12,
   },
-  backBtn: {
-    padding: 4,
-    marginRight: 2,
+  circleIconBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#FFFFFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  avatarWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#EDE9FE',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  miniFaceWrap: {
-    width: 38,
-    height: 38,
-    borderRadius: radius.md,
+  titleColumn: {
     justifyContent: 'center',
-    alignItems: 'center',
   },
   robotHudName: {
-    color: '#F8FAFC',
-    fontWeight: '700',
-    fontSize: 15,
+    color: '#0F172A',
+    fontWeight: '800',
+    fontSize: 18,
+    letterSpacing: -0.2,
   },
   liveBadgeRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: 6,
     marginTop: 2,
   },
   liveDot: {
@@ -1087,61 +1133,46 @@ const styles = StyleSheet.create({
     backgroundColor: '#EF4444',
   },
   liveText: {
-    color: '#EF4444',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 0.5,
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '500',
   },
-  timerText: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontVariant: ['tabular-nums'],
-  },
-  hudRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  telemetryTag: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: '#1E293B',
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 5,
-    borderRadius: radius.full,
-  },
-  telemetryTagText: {
-    color: '#E2E8F0',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  endBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#EF4444',
+  endCallBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#FEE2E2',
     justifyContent: 'center',
     alignItems: 'center',
+    shadowColor: '#EF4444',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 2,
   },
   statusBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 6,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: 16,
+    marginHorizontal: 20,
+    marginBottom: 8,
+    borderRadius: 12,
   },
   statusBannerText: {
-    color: '#000',
     fontSize: 12,
     fontWeight: '700',
   },
-  cameraViewport: {
-    width: '100%',
-    aspectRatio: 4 / 3, // Constrain to native 4:3 OV3660 camera sensor aspect ratio
-    backgroundColor: '#000000',
-    position: 'relative',
+  cameraViewportCard: {
+    marginHorizontal: 20,
+    flex: 1,
+    maxHeight: 280,
+    minHeight: 210,
+    backgroundColor: '#E8EAF5',
+    borderRadius: 28,
     overflow: 'hidden',
+    position: 'relative',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -1150,265 +1181,285 @@ const styles = StyleSheet.create({
     height: '100%',
     position: 'absolute',
   },
-  perspectiveFloor: {
+  cameraBadgesRow: {
     position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: '40%',
-    backgroundColor: '#0B132B',
-    opacity: 0.4,
-    borderTopWidth: 1,
-    borderTopColor: '#1E293B',
-  },
-  reticleCenter: {
-    width: 60,
-    height: 60,
-    justifyContent: 'center',
-    alignItems: 'center',
-    opacity: 0.35,
-  },
-  reticleLineH: {
-    position: 'absolute',
-    width: 50,
-    height: 1,
-    backgroundColor: '#38BDF8',
-  },
-  reticleLineV: {
-    position: 'absolute',
-    width: 1,
-    height: 50,
-    backgroundColor: '#38BDF8',
-  },
-  viewportOverlayBottom: {
-    position: 'absolute',
-    bottom: 12,
-    left: 16,
-    right: 16,
+    top: 14,
+    left: 14,
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    gap: 8,
+    zIndex: 10,
   },
-  videoQualityTag: {
+  badgePill: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(15, 23, 42, 0.75)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  videoQualityText: {
-    color: '#94A3B8',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  timestampOverlay: {
-    color: '#64748B',
-    fontSize: 11,
-    fontVariant: ['tabular-nums'],
-  },
-  connectingOverlay: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(2, 6, 23, 0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  connectingText: {
-    color: '#F8FAFC',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  controlsArea: {
-    flex: 1,
-    backgroundColor: '#0A0F1D',
-    borderTopWidth: 1,
-    borderTopColor: '#1E293B',
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
-    justifyContent: 'space-evenly',
-    gap: spacing.sm,
-  },
-  toolRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-  },
-  speedSelector: {
-    flexDirection: 'row',
-    backgroundColor: '#1E293B',
-    borderRadius: radius.full,
-    padding: 3,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  speedChip: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: radius.full,
-  },
-  speedChipActive: {
-    backgroundColor: '#7C3AED',
-  },
-  speedChipText: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  speedChipTextActive: {
-    color: '#FFF',
-  },
-  emergencyBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: '#EF4444',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: radius.full,
-  },
-  emergencyText: {
-    color: '#FFF',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  emotesDrawerBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: '#1E293B',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: radius.full,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  emotesDrawerText: {
-    color: '#A78BFA',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  bottomControls: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingTop: spacing.xs,
-  },
-  joystickContainer: {
     alignItems: 'center',
     gap: 6,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  badgeText: {
+    color: '#0F172A',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  cameraPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  cameraPlaceholderText: {
+    color: '#64748B',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  fullscreenBtn: {
+    position: 'absolute',
+    bottom: 14,
+    right: 14,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#FFFFFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  bottomSheet: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 36,
+    borderTopRightRadius: 36,
+    marginTop: 16,
+    paddingHorizontal: 24,
+    paddingTop: 22,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -3 },
+    shadowOpacity: 0.04,
+    shadowRadius: 14,
+    elevation: 4,
+  },
+  sheetTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 24,
+  },
+  speedSelectorPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F3F9',
+    borderRadius: 28,
+    padding: 4,
+  },
+  speedOption: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 22,
+  },
+  speedOptionActive: {
+    backgroundColor: '#634AF6',
+    paddingHorizontal: 18,
+    shadowColor: '#634AF6',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  speedOptionText: {
+    color: '#475569',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  speedOptionTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+  },
+  emotesPillBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 28,
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
+    elevation: 1,
+  },
+  emotesPillText: {
+    color: '#1E293B',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  consoleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 8,
+  },
+  joystickColumn: {
+    alignItems: 'center',
   },
   joystickBase: {
-    width: JOYSTICK_RADIUS * 2,
-    height: JOYSTICK_RADIUS * 2,
-    borderRadius: JOYSTICK_RADIUS,
-    backgroundColor: '#1E293B',
-    borderWidth: 2,
-    borderColor: '#334155',
+    width: 196,
+    height: 196,
+    borderRadius: 98,
+    backgroundColor: '#F0F2FA',
     justifyContent: 'center',
     alignItems: 'center',
+    position: 'relative',
   },
-  guideRing: {
-    width: JOYSTICK_RADIUS * 1.2,
-    height: JOYSTICK_RADIUS * 1.2,
-    borderRadius: JOYSTICK_RADIUS * 0.6,
-    borderWidth: 1,
-    borderColor: '#334155',
-    borderStyle: 'dashed',
+  arrowTop: {
     position: 'absolute',
+    top: 14,
+    left: 86,
   },
-  crosshairH: {
+  arrowBottom: {
     position: 'absolute',
-    width: JOYSTICK_RADIUS * 1.5,
-    height: 1,
-    backgroundColor: '#334155',
+    bottom: 14,
+    left: 86,
   },
-  crosshairV: {
+  arrowLeft: {
     position: 'absolute',
-    width: 1,
-    height: JOYSTICK_RADIUS * 1.5,
-    backgroundColor: '#334155',
+    left: 14,
+    top: 86,
+  },
+  arrowRight: {
+    position: 'absolute',
+    right: 14,
+    top: 86,
   },
   joystickPuck: {
-    width: PUCK_RADIUS * 2,
-    height: PUCK_RADIUS * 2,
-    borderRadius: PUCK_RADIUS,
-    backgroundColor: '#7C3AED',
-    borderWidth: 3,
-    borderColor: '#A78BFA',
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    backgroundColor: '#634AF6',
+    borderWidth: 4,
+    borderColor: '#FFFFFF',
+    shadowColor: '#634AF6',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+  columnLabel: {
+    color: '#475569',
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 12,
+  },
+  actionsColumn: {
+    alignItems: 'center',
+    width: 100,
+    gap: 16,
+  },
+  actionItem: {
+    alignItems: 'center',
+  },
+  stopCircleBtn: {
+    width: 74,
+    height: 74,
+    borderRadius: 37,
+    backgroundColor: '#E11D48',
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#7C3AED',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5,
-    shadowRadius: 8,
-    elevation: 8,
+    shadowColor: '#E11D48',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    elevation: 6,
   },
-  puckDot: {
-    width: 10,
-    height: 10,
+  stopInnerSquare: {
+    width: 20,
+    height: 20,
+    backgroundColor: '#FFFFFF',
     borderRadius: 5,
-    backgroundColor: '#FFF',
   },
-  pttContainer: {
-    alignItems: 'center',
-    gap: 6,
+  stopLabel: {
+    color: '#DC2626',
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 6,
   },
-  pttButtonWrapper: {
-    width: 90,
-    height: 90,
+  micBtnWrapper: {
+    width: 92,
+    height: 92,
     justifyContent: 'center',
     alignItems: 'center',
     position: 'relative',
   },
   pttWavePulse: {
     position: 'absolute',
-    width: 90,
-    height: 90,
-    borderRadius: 45,
+    width: 92,
+    height: 92,
+    borderRadius: 46,
   },
-  pttMainBtn: {
-    width: 76,
-    height: 76,
-    borderRadius: 38,
+  micMainBtn: {
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    backgroundColor: '#634AF6',
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 2,
+    shadowColor: '#634AF6',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.38,
+    shadowRadius: 16,
+    elevation: 8,
   },
-  lockBtn: {
+  micMainBtnActive: {
+    backgroundColor: '#4F46E5',
+    transform: [{ scale: 0.96 }],
+  },
+  micLockBadge: {
     position: 'absolute',
-    top: 0,
-    right: 0,
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+    top: -3,
+    right: -3,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#FFFFFF',
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: '#334155',
-  },
-  controlHint: {
-    color: '#64748B',
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 5,
+    elevation: 3,
   },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
     justifyContent: 'flex-end',
   },
   drawerCard: {
-    backgroundColor: '#0F172A',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
     padding: spacing.lg,
-    maxHeight: '60%',
-    borderTopWidth: 1,
-    borderTopColor: '#334155',
+    maxHeight: '65%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 16,
+    elevation: 10,
     gap: spacing.md,
   },
   drawerHeader: {
@@ -1416,7 +1467,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
+    borderBottomColor: '#F1F5F9',
     paddingBottom: spacing.sm,
   },
   drawerHeaderLeft: {
@@ -1425,12 +1476,14 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   drawerTitle: {
-    color: '#F8FAFC',
-    fontSize: 16,
+    color: '#0F172A',
+    fontSize: 17,
     fontWeight: '700',
   },
   closeDrawerBtn: {
-    padding: 4,
+    padding: 6,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 16,
   },
   drawerSectionLabel: {
     color: '#64748B',
@@ -1449,20 +1502,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#1E293B',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.md,
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: '#E2E8F0',
   },
   drawerEmoteChipActive: {
-    borderColor: '#7C3AED',
-    backgroundColor: 'rgba(124, 58, 237, 0.2)',
+    borderColor: '#634AF6',
+    backgroundColor: '#EDE9FE',
   },
   drawerEmoteText: {
-    color: '#E2E8F0',
+    color: '#1E293B',
     fontSize: 13,
+    fontWeight: '600',
   },
   drawerGesturesGrid: {
     flexDirection: 'row',
@@ -1471,16 +1525,23 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
   },
   drawerGestureBtn: {
-    backgroundColor: '#1E293B',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.md,
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: '#E2E8F0',
   },
   drawerGestureText: {
-    color: '#E2E8F0',
+    color: '#1E293B',
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '700',
+  },
+  drawerTrickBtn: {
+    borderColor: '#634AF6',
+    backgroundColor: '#F5F3FF',
+  },
+  drawerTrickText: {
+    color: '#634AF6',
   },
 });
